@@ -1,0 +1,235 @@
+---
+title: "differential_abundance"
+output: html_document
+date: "2023-09-17"
+---
+
+```{r library}
+if(!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("Maaslin2")
+sessionInfo()
+```
+
+```{r}
+library(Maaslin2)
+library(tidyverse)
+library(ggplot2)
+library(vdbR)
+library(janitor)
+library(RColorBrewer)
+```
+
+```{r postgres}
+connect_database()
+list_table_from_database(pattern = '*')
+get_table_from_database("asv_counts_ag")
+get_table_from_database("asv_annotation_blast_ag")
+get_table_from_database("asv_annotation_blast_color_ag")
+```
+
+```{r indican}
+indican<-read_excel('../Ruben_data/Eli_Ruben/ruben_urine_data_eli_mod_10-2-23.xlsx', skip=1)
+indican_data<-indican%>%
+  filter(ruben_exclude_samples=='No',
+         !is.na(`eli_indican conc. (umol/mmol creatinine)`))%>%
+  select(`MSK ID`,`ind_cre_ruben (umol/mmol creatinine)`,`eli_indican conc. (umol/mmol creatinine)`,)%>%
+  rename(ind_cre_MS ='ind_cre_ruben (umol/mmol creatinine)',
+         ind_cre_colorimetric ='eli_indican conc. (umol/mmol creatinine)')%>%
+  clean_names()
+str(indican_data)
+
+eli_indican<-read.csv('../data/gvhd_indican/indican_data.csv')%>%
+  rename(msk_id='sample_id',sampleid='stool_id')
+str(eli_indican)
+
+eli_rub_indican<-indican_data%>%
+  filter(msk_id %in% eli_indican$msk_id,
+         ind_cre_colorimetric<=60)%>%
+  left_join(eli_indican)%>%
+  select(1:6)
+
+n_distinct(eli_rub_indican$sampleid)
+n_distinct(eli_rub_indican$msk_id)
+n_distinct(eli_rub_indican$aliquot)
+```
+
+```{r relab table}
+relab<-read.csv('../data/final_taxonomy.csv')
+n_distinct(relab$sampleid)
+
+ind_relab<-relab%>%
+  filter(!is.na(genus))%>%
+  left_join(eli_rub_indican,by='sampleid')%>%
+  inner_join(asv_annotation_blast_color_ag,by='genus')
+
+str(ind_relab)
+n_distinct(ind_relab$sampleid) #133
+n_distinct(ind_relab$msk_id) #141
+n_distinct(ind_relab$aliquot) #141
+n_distinct(ind_relab$mrn) #69
+
+asv_annotation_blast_color_ag<-asv_annotation_blast_color_ag%>%
+  filter(!duplicated(genus))%>%
+  select(genus,color_label_group)
+
+```
+
+```{r}
+#aggregate genus rel.abun based on color_label_group
+
+ind.color.relab<-ind_relab%>%
+  select(msk_id,color_label_group,count_relative)%>%
+  group_by(msk_id,color_label_group)%>%
+  summarize(rel_abundance = sum(count_relative))%>%
+  mutate(rel_abundance = rel_abundance/100)%>%
+  ungroup()
+
+Features.1<-ind.color.relab%>%
+  pivot_wider(names_from = color_label_group,values_from = rel_abundance)%>%
+  column_to_rownames("msk_id")
+  
+Features.1[is.na(Features.1)] <- 0
+
+Metadata.1<-ind_relab%>%
+  select(msk_id,ind_cre_ms,ind_cre_colorimetric,)%>%
+  distinct(msk_id, .keep_all = TRUE)%>%
+  column_to_rownames("msk_id")
+
+
+```
+
+```{r}
+#there are duplicate combinations of rel.abundance due to diff species in the genus columns to pivot the data from long to wide format.
+#Aggregate the values before pivoting
+genus_summarized<-ind_relab%>%
+  select(-c(aliquot))%>%
+  group_by(mrn,sampleid,msk_id,genus,ind_cre_ms,ind_cre_colorimetric)%>%
+  summarize(rel_abundance = sum(count_relative))%>%
+  mutate(rel_abundance = rel_abundance/100)%>%
+  ungroup()
+
+```
+
+```{r colimetric}
+#running maaslin individually
+
+maaslin_result.col <-Maaslin2(
+  input_data = Features.1,
+  input_metadata = Metadata.1,
+  output = "maaslin_out_col",
+  fixed_effects = c("ind_cre_colorimetric"),
+  random_effects = c("msk_id"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+
+alpha_levels <- c(".0001 or less", ".001", ".01", ".05", ".05 or above")
+alpha_breaks <- rev(c(.15, .5, .62, .7, .85))
+
+maaslin_out_col<-maaslin_result.col$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+p.col<-maaslin_out_col%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size = 4) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 8,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=4)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=4))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p.col
+```
+
+```{r ms}
+#running maaslin individually
+
+maaslin_result.ms <-Maaslin2(
+  input_data = Features.1,
+  input_metadata = Metadata.1,
+  output = "maaslin_out_ms",
+  fixed_effects = c("ind_cre_ms"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+
+alpha_levels <- c(".0001 or less", ".001", ".01", ".05", ".05 or above")
+alpha_breaks <- rev(c(.15, .5, .62, .7, .85))
+
+maaslin_out_ms<-maaslin_result.ms$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+p.ms<-maaslin_out_ms%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size = 4) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 8,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=4)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=4))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+
+p.ms
+```
+
+
+

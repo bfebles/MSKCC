@@ -1,0 +1,173 @@
+---
+title: "indoxyl_sulphate analysis"
+output: html_document
+author: "Binita Febles"
+date: "`r format(Sys.Date(),'%e %B, %Y')`"
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=20,
+                      fig.height=15,
+                      fig.path="./figures/",
+                      dev='png',
+                      warning=FALSE,
+                      message=FALSE)
+```
+
+```{r library}
+library(tidyverse)
+library(ggplot2)
+library(vdbR)
+library(janitor)
+library(gridExtra)
+```
+
+```{r postgres}
+connect_database()
+get_table_from_database("patient_allo_ks_20221104")
+```
+
+```{r data}
+#indican data
+indican<-read.csv('../data/gvhd_indican/indican_data.csv')
+colnames(indican)
+str(indican)
+indican.filt<-indican%>%
+  select(aliquot,stool_id,indican.conc...umol.mmol.creatinine.)%>%
+  rename(indican_conc='indican.conc...umol.mmol.creatinine.',urine_aliquot='aliquot')%>%
+  mutate(indican_conc=as.numeric(indican_conc)) 
+
+#urine-stool-clinical data
+combined<-read.csv('../data/gvhd_indican/consolidated_374_urine_samples.csv')%>%
+  clean_names()
+str(combined)
+
+clinical<-combined%>%
+  select(mrn,stool_id,urine_aliquot,urine_date,stool_collection_date,delta_stool_urine,stool_preceeds_urine,simpson_reciprocal,hct,d100_acute_gvhd,acute_gv_hd_onset_date)%>%
+  left_join(indican.filt,by='urine_aliquot', multiple='all')%>%
+  mutate(urine_date=as.Date(urine_date),
+         hct=as.Date(hct),
+         acute_gv_hd_onset_date=as.Date(acute_gv_hd_onset_date),
+         day_rel_transplant = as.numeric(urine_date - hct),
+         hct_rel_agvhd = as.numeric(acute_gv_hd_onset_date - hct))
+n_distinct(clinical$mrn)
+
+
+clinical_agvhd <- clinical %>%
+  select(mrn,indican_conc,day_rel_transplant,d100_acute_gvhd,hct_rel_agvhd, simpson_reciprocal)%>%
+  filter(!is.na(indican_conc), indican_conc<=60) %>% 
+  filter(d100_acute_gvhd=='Y')
+n_distinct(clinical_agvhd$mrn)
+
+str(clinical_agvhd)
+```
+
+
+```{r indican-gvhd}
+
+# List to store plots
+plots_list <- list()
+
+# Create and store individual plots
+for (i in unique(clinical_agvhd$mrn)) {
+  subset_data <- clinical_agvhd %>%
+    filter(mrn == i)
+  
+  p <- ggplot(subset_data, aes(x = indican_rel_hct, y = indican_conc)) +
+    geom_point() +
+    geom_line(show.legend = FALSE)+
+    geom_vline(aes(xintercept = hct_rel_agvhd), color = "red", linetype = "dashed")+
+    geom_text(aes(x = hct_rel_agvhd,y = min(indican_conc), label = 'aGVHD'), 
+              color = "red", angle = 90, vjust = -0.5, hjust = -0.5, size = 2) +
+    labs(title = paste("MRN:", i), x = "Indican_rel_hct", y = "Indican_conc")
+   
+  
+  plots_list[[as.character(i)]] <- p
+}
+
+# Arrange plots into multiple pages with 4 plots each
+num_plots_per_page <- 4
+num_pages <- ceiling(length(plots_list) / num_plots_per_page)
+
+for (page_num in seq_len(num_pages)) {
+  start_idx <- (page_num - 1) * num_plots_per_page + 1
+  end_idx <- min(start_idx + num_plots_per_page - 1, length(plots_list))
+  plots_subset <- plots_list[start_idx:end_idx]
+  
+  # Create a grid of plots for the current page
+  grid <- grid.arrange(grobs = plots_subset, ncol = 2)
+  
+
+  # print to a PDF file
+  ggsave(filename = paste0("plots_page_", page_num, ".pdf"), grid)
+}
+
+```
+
+```{r indiacan-alpha-gvhd}
+
+alpha_agvhd<-clinical_agvhd%>%
+    filter(!is.na(simpson_reciprocal))%>%
+  distinct()
+n_distinct(alpha_agvhd$mrn)
+
+
+# List to store plots
+plots_list <- list()
+
+# Create and store individual plots
+for (i in unique(alpha_agvhd$mrn)) {
+  alpha_data <- alpha_agvhd %>%
+    filter(mrn == i)
+  
+  p1 <- ggplot(alpha_data, aes(x = day_rel_transplant, y = indican_conc)) +
+    geom_point(show.legend = FALSE) +
+    geom_line(show.legend = FALSE) +
+    geom_vline(aes(xintercept = hct_rel_agvhd), color = "red", linetype = "dashed") +
+    geom_text(aes(x = hct_rel_agvhd, y = min(indican_conc), label = 'aGVHD'), 
+              color = "red", angle = 90, vjust = -0.5, hjust = -2, size = 2) +
+    labs(x = "day_rel_transplant", y = "Indican_conc")+
+    theme(axis.title = element_text(size = 6))+
+    xlim(-10,100)
+  
+ 
+  
+  # Calculate the secondary y-axis values for p2
+  max_indican_conc <- max(alpha_data$indican_conc)
+  max_simpson_reciprocal <- max(alpha_data$simpson_reciprocal)
+  scale_factor <- max_simpson_reciprocal / max_indican_conc
+  
+  # Combine Plot 1 and Plot 2 with a secondary y-axis
+  combined_plot <- p1 + geom_point()+
+    geom_point(data=alpha_data,aes(x = day_rel_transplant, y = simpson_reciprocal / scale_factor), 
+              color = "blue", size = 1.5) +
+    geom_line(data = alpha_data, aes(x = day_rel_transplant, y = simpson_reciprocal / scale_factor), 
+              color = "blue") +
+    scale_y_continuous(sec.axis = sec_axis(~ . * scale_factor, 
+                                            name = "Simpson_reciprocal")) +
+    facet_wrap(~ mrn, ncol = 2, labeller = label_both)+
+    theme(axis.title = element_text(size = 6),
+          axis.text = element_text(size = 6))
+  
+  
+  plots_list[[as.character(i)]] <- combined_plot
+}
+
+# Arrange plots into multiple pages with 4 plots each
+num_plots_per_page <- 4
+num_pages <- ceiling(length(plots_list) / num_plots_per_page)
+
+for (page_num in seq_len(num_pages)) {
+  start_idx <- (page_num - 1) * num_plots_per_page + 1
+  end_idx <- min(start_idx + num_plots_per_page - 1, length(plots_list))
+  plots_subset <- plots_list[start_idx:end_idx]
+  
+  # Create a grid of plots for the current page
+  grid <- grid.arrange(grobs = plots_subset, ncol = 2)
+  
+  # Save or display the current page
+  # print to a PDF file or display it
+  ggsave(filename = paste0("alpha_indican_agvhd_page_", page_num, ".pdf"), grid)
+}
+
+```

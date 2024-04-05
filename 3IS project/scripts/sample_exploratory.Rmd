@@ -1,0 +1,221 @@
+---
+title: "indoxyl_sulphate analysis"
+output: html_document
+author: "Binita Febles"
+date: "`r format(Sys.Date(),'%e %B, %Y')`"
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=20,
+                      fig.height=15,
+                      fig.path="./figures/",
+                      dev='png',
+                      warning=FALSE,
+                      message=FALSE)
+```
+
+```{r}
+library(vdbR)
+library(tidyverse)
+library(purrr)
+library(janitor)
+library(readxl)
+library(ggplot2)
+```
+
+```{r}
+connect_database()
+get_table_from_database("samples_castori_ag")
+get_table_from_database("shotgun_lookup_ad")
+```
+
+#### Patient-level data
+```{r}
+#load randomized table
+randomized<-read_excel("../data/Amethyst/17-097 Patients_Arm and Evaluability.xlsx")
+n_distinct(randomized$MRN)#234 unique patient
+class(randomized$MRN)
+
+#Add leading '0' to MRN for the ones with less than 8 characters.
+randomized$MRN<-str_pad(randomized$MRN, 8, side = "left", pad = 0)
+
+
+#we are only interested in non-evaluable patients
+randomized_Yes<-randomized%>%filter(Evaluable=='Yes') %>% distinct(MRN, .keep_all = TRUE)#74
+randomized_No<-randomized%>%filter(Evaluable=='No') %>% distinct(MRN, .keep_all = TRUE) #160
+```
+
+```{r}
+#load observational table
+observational<-read_excel("../data/Amethyst/17-097 and 17-468 HOTB Urine Samples_21FEB2023.xlsx")
+n_distinct(observational$MRN)
+class(observational$MRN)
+
+#There are 1264 samples from 277 unique patients
+#check how many samples belong to randomized vs observational cohort
+
+table(observational$`Purpose Code`)
+
+#check if any patients from randomized_Yes (evaluable) are in observed cohort
+randomizedinobs<-randomized_Yes%>%
+  mutate(inobs = as.integer(randomized_Yes$MRN %in% observational$MRN))
+
+#53 evaluable-Yes patients from randomized cohort are in observational cohort. We can't include these patients in our analysis.
+
+#join observational and randomized tables and exclude all evaluable patients
+#Evaluable column is filled with NA for observational cohort when we do left-join. So, I filtered out all the patients that are evaluable from randomized cohort and kept the ones that has NA value which is from observational cohort.
+
+#only include unique urine collection date per patient
+final.dat<-left_join(observational,randomized,by = 'MRN')%>%
+  filter(Evaluable != 'Yes' | is.na(Evaluable))%>%
+  group_by(MRN)%>%
+  distinct(`Collection Date`, .keep_all = T)%>%
+  ungroup()
+
+#samples requested from HOTB
+write.csv(final.dat,'../data/urine_specimen.csv',row.names = F)
+
+###### checking list for final submission to HOTB########
+
+unique_MRNs <-final.dat%>% distinct(MRN)%>%pull(MRN)
+write.csv(unique_MRNs,'specimen_MRN.csv')
+n_distinct(final.dat$`Specimen ID`)
+n_distinct(final.dat$MRN)
+##############################################
+```
+
+```{r}
+#rename certain cols in urine sample data set so that when we join with stool sample table, we have distinct collection date for urine and stool
+final.dat<-final.dat%>%
+  rename(urine_collection_date=`Collection Date`,urine_rel_day_from_BMT=`Days from BMT Date`,urine_specimen_ID = `Specimen ID`)
+
+#get number of urine samples for each unique patient
+n_urine.samp<-final.dat%>%
+  group_by(MRN)%>%
+  summarise(n_urine_sample = n_distinct(urine_collection_date))%>%
+  ungroup()
+```
+
+```{r}
+#load Amethyst dataset with MRN,HCT and GVHD profile for patients.
+#read data from multiple excel sheets
+gvhd.dat.list<-map(set_names(excel_sheets("../data/Amethyst/RC350_Peled_BMTUrineSamples_2023MAY23.xlsx")),read_excel,path="../data/Amethyst/RC350_Peled_BMTUrineSamples_2023MAY23.xlsx")
+
+#convert list of sheets into individual dataframes
+purrr::map(names(gvhd.dat.list), ~ assign(.x,gvhd.dat.list[[.x]],envir = .GlobalEnv))
+
+#need to change date format in two dataframes
+`17-097 N=234`$HSCT_Date <- excel_numeric_to_date(as.numeric(as.character(`17-097 N=234`$HSCT_Date)),date_system = "modern")
+`17-468 N=146`$`HSCT Date` <- excel_numeric_to_date(as.numeric(as.character(`17-468 N=146`$`HSCT Date`)),date_system = "modern")
+glimpse(`17-097 N=234`)
+glimpse(`17-468 N=146`)
+```
+
+```{r}
+#get HCT info from Amethyst dataset and join with urine specimen data
+
+sample.dat<-left_join(final.dat,`HCT N=323`,by='MRN')%>%
+  select(MRN,`Last Name`,Cohort_IRB, `Purpose Code`,Evaluable,`Collection Age`,urine_specimen_ID,`Tank ID`, Hanger,Box,Slot,Aliquot, `Vials Available`,urine_collection_date,HCT,`First BMT Date`)
+  
+n_distinct(sample.dat$MRN)
+
+#some patient's BMT is unavailable in Amethyst data and has NA value.
+#urine specimen table has BMT date available for those patient.
+#make one column 'HCT_date' to fill the NAs value with dates available from urine specimen table
+sample.dat<-sample.dat%>%
+  mutate(HCT_Date = case_when(
+    is.na(HCT) ~ `First BMT Date`,
+    !is.na(HCT) ~ HCT
+  ))%>%
+  select(-c(HCT,`First BMT Date`))%>%
+  relocate(HCT_Date, .after = `Vials Available`)
+
+str(sample.dat)
+
+#convert POSIXct to date format
+sample.dat$urine_collection_date<-as.Date(as.character(sample.dat$urine_collection_date))
+sample.dat$HCT_Date<-as.Date(as.character(sample.dat$HCT_Date))                                         
+str(sample.dat)
+
+#which patient have more than 1 BMT date
+unique.HCT<-sample.dat%>%group_by(MRN)%>%
+  summarize(unique_HCT=n_distinct(HCT_Date))%>%
+  ungroup()
+
+patient_with_multiple_BMTdates<-unique.HCT[unique.HCT$unique_HCT > 1,]
+
+
+#calculate day relative to urine collection based on updated HCT date 
+sample.dat.update$urine_day_rel_HCT <- as.numeric(sample.dat.update$urine_collection_date - sample.dat.update$HCT_Date)
+
+#plot number of urine samples per day relative to HCT
+
+plot.hct.samples<-sample.dat.update%>%
+  group_by(urine_day_rel_HCT,MRN,`Purpose Code`)%>%
+  mutate(`Purpose Code`=recode(`Purpose Code`, "17-097"="Antibiotic-randomization Cohort","17-468"="Observational Cohort"))%>%
+  mutate(n=row_number())%>%
+  group_by(urine_day_rel_HCT,urine_collection_date,`Purpose Code`)%>%
+  summarise(n=sum(n==1))%>%
+  ungroup()
+
+plot.hct.samples%>%count(urine_day_rel_HCT)
+
+# day relative to HCT ranges from (-687 days to 3310 days)
+#lets take relative day to HCT from (-50 to 365 days)
+plot.hct.samples%>%
+  filter(urine_day_rel_HCT %in% -50:365)%>%
+  ggplot(aes(x=factor(urine_day_rel_HCT, level=c(-30:365)),y=n))+
+  geom_bar(stat = 'identity')+
+  facet_grid(~factor(`Purpose Code`),scales = 'free',space = 'free_x')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x='day_relative_to_hct',y='number of urine samples', )+
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90))
+
+ggsave('../plots/urine_samplesvsDayRelHCT.pdf',width = 12,height = 6)
+
+#day 0 has the highest number of urine samples followed by day 7,14,21 and 28 in observational cohort
+
+```
+
+```{r stool samples}
+#load data with stool samples from castori table
+
+stool.sample<-samples_castori_ag%>%
+  filter(sampletype=='Stool' | sampletype == 'stool')%>%
+  rename(MRN = mrn, stool_collection_date=datecollection)%>%
+  select(sampleid,MRN,stool_collection_date)
+
+class(stool.sample$MRN)
+
+#convert stool_collection_date from character into date format
+stool.sample$stool_collection_date<-as.Date(stool.sample$stool_collection_date)  
+str(stool.sample)
+```
+
+```{r}
+#join urine sample table with stool sample table, filter with no stool samples available
+#calculate days difference between urine and stool collection date. 
+
+urine.stool.sample<-left_join(sample.dat.update,stool.sample,by='MRN')%>%
+  filter(!is.na(sampleid))%>%
+  mutate(stool_day_rel_HCT = as.numeric(stool_collection_date - HCT_Date))%>%
+  mutate(stool_rel_urine_day = as.numeric(stool_collection_date - urine_collection_date))
+
+#if stool_rel_urine_day is (-ve), then stool sample was collected before urine sample
+
+
+#how many patient doesn't have stool sample?
+urine.stool.sample%>%
+  filter(is.na(sampleid))%>%
+  distinct(MRN)
+
+#42 patients don't have any stool samples.
+
+sum(is.na(urine.stool.sample$sampleid))
+
+n_distinct(urine.stool.sample$sampleid)
+n_distinct(urine.stool.sample$MRN)
+
+write.csv(urine.stool.sample,'../data/urine_stool_combined.csv',row.names = F)
+```

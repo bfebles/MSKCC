@@ -1,0 +1,110 @@
+---
+title: "MS-colometric-compare"
+output: html_document
+date: "2023-10-16"
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=20,
+                      fig.height=15,
+                      fig.path="./figures/",
+                      dev='png',
+                      warning=FALSE,
+                      message=FALSE)
+```
+
+```{r library}
+library(tidyverse)
+library(ggplot2)
+library(vdbR)
+library(janitor)
+library(gridExtra)
+library(ggpubr)
+library(readxl)
+library(patchwork)
+```
+
+```{r data}
+#load data including indican/indoles and microbiome data
+
+indican_microbiome <-read.csv('../data/indican_microbiome.csv')
+str(indican_microbiome)
+
+filtered_data <- indican_microbiome %>%
+  filter(ruben_exclude_samples == 'No',
+         !is.na(eli_indican_conc_umol_mmol_creatinine),
+         eli_indican_conc_umol_mmol_creatinine <= 60,
+         ind_cre_ruben_umol_mmol_creatinine < 100)
+n_distinct(filtered_data$msk_id)
+n_distinct(filtered_data$aliquot)
+
+### sample distribution
+
+# Specify a consistent bin width for both histograms
+bin_width <- 2
+
+overlayed_hist <- ggplot() +
+  # Colorimetric Assay histogram
+  geom_histogram(data = filtered_data, aes(x = eli_indican_conc_umol_mmol_creatinine, fill = "Colorimetric Assay"), alpha = 0.5, binwidth = bin_width) +
+  # LC-MS histogram
+  geom_histogram(data = filtered_data, aes(x = ind_cre_ruben_umol_mmol_creatinine, fill = "LC-MS"), alpha = 0.5, binwidth = bin_width) +
+  # Set custom colors for the legend
+  scale_fill_manual(values = c("Colorimetric Assay" = "blue", "LC-MS" = "red"), name = "Method") +
+  labs(x = "indican concentration", y = "number of samples")
+
+print(overlayed_hist)
+ggsave('../plots/sample_distribution-MS-col.png')
+```
+
+```{r comparison}
+#ruben vs Eli's indican_concentration
+
+
+p1 <- filtered_data %>%
+  ggplot(aes(x = eli_indican_conc_umol_mmol_creatinine, y = ind_cre_ruben_umol_mmol_creatinine)) +
+  geom_point(size = 2.5, alpha = 0.6, color = 'darkgreen') +
+  geom_smooth(method = "lm", color = "darkred", linewidth = 2)+stat_cor()+
+  labs(x = "colorimetric umol/mmol crea", y = "LC-MS umol/mmol crea") 
+
+p1
+
+```
+
+```{r comparison}
+#ruben vs Elis indican_concentration
+# using summed indole column vs 3IS column
+
+p2 <- filtered_data %>%
+  ggplot(aes(x = eli_indican_conc_umol_mmol_creatinine, y = all_indoles_cre_ruben)) +
+  geom_point(size = 2.5, alpha = 0.6, color = 'darkgreen') +
+  geom_smooth(method = "lm", color = "darkred", linewidth = 2) +
+  stat_cor(label.x = 20, label.y = 50, method = "pearson") +
+  labs(x = "colorimetric umol/mmol crea", y = " summed LC-MS umol/mmol crea") 
+
+p2
+```
+```{r alpha diversity}
+p3 <- filtered_data %>%
+  filter(!is.na(simpson_reciprocal))%>%
+  ggplot(aes(x = eli_indican_conc_umol_mmol_creatinine, y = simpson_reciprocal)) +
+  geom_point(size = 2.5, alpha = 0.6, color = 'darkgreen') +
+  geom_smooth(method = "lm", color = "darkred", linewidth = 2) +
+  stat_cor()+
+  labs(x="colorimetric umol/mmol crea")
+
+p3
+
+p4 <- indican_microbiome %>%
+  filter(ruben_exclude_samples == 'No',
+         ind_cre_ruben_umol_mmol_creatinine < 100,
+    !is.na(simpson_reciprocal))%>%
+  ggplot(aes(x = ind_cre_ruben_umol_mmol_creatinine, y = simpson_reciprocal)) +
+  geom_point(size = 2.5, alpha = 0.6, color = 'darkblue') +
+  geom_smooth(method = "lm", color = "darkred", linewidth = 2) +
+  stat_cor()+
+  labs(x="LC-MS umol/mmol crea")
+
+p4
+
+
+```

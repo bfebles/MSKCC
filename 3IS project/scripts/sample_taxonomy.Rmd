@@ -1,0 +1,345 @@
+---
+title: "sample_taxonomy"
+output: html_document
+date: "2023-10-17"
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=20,
+                      fig.height=15,
+                      fig.path="./figures/",
+                      dev='png',
+                      warning=FALSE,
+                      message=FALSE)
+```
+
+```{r}
+library(vdbR)
+library(tidyverse)
+library(purrr)
+library(janitor)
+library(readxl)
+library(ggplot2)
+library(grid)
+library(vegan)
+library(Rtsne)
+```
+
+```{r}
+connect_database()
+get_table_from_database("asv_counts_ag")
+get_table_from_database("asv_annotation_blast_ag")
+get_table_from_database('alpha_diversity_ag')
+```
+
+
+```{r}
+urine.stool.sample<-read.csv('../data/urine_stool_combined.csv')
+
+#load taxonomy assignments and count table for new sequenced samples
+new_sample<-read.csv('../data/eli_new_samples/final_count_table.csv')
+n_distinct(new_sample$sampleid) #88
+
+#check which samples have already annotated taxonomic assignments
+asv_stool.sample <- urine.stool.sample %>%
+  group_by(MRN) %>%
+  distinct(sampleid) %>%
+  ungroup() %>%
+  mutate(
+    asv_annotation = ifelse(sampleid %in% asv_counts_ag$sampleid | sampleid %in% new_sample$sampleid, 'Yes', 'No'))
+#out of 1186 stool samples, 839 samples have previously annotated taxonomic assignments.
+#with 88 newly sequenced samples, total of 927 samples have taxonomic assignments available
+```
+
+```{r}
+#get sample id that has 16s annotation available
+
+stool_asv_count<-left_join(asv_stool.sample,asv_counts_ag,by='sampleid')%>%
+  select(sampleid,asv_key,count_relative)
+
+#join asv_count table with taxonomy table 
+
+stool_asv_tab<-left_join(stool_asv_count,asv_annotation_blast_ag,by='asv_key')%>%
+  select(sampleid,count_relative,family,genus)%>%
+  filter(!is.na(count_relative))
+
+sum(is.na(stool_asv_tab$count_relative))
+n_distinct(stool_asv_tab$sampleid)
+
+
+
+#join both table
+
+final_asv_tab<-rbind(stool_asv_tab,new_sample)%>%
+  filter(!is.na(genus))
+n_distinct(final_asv_tab$sampleid)
+sum(is.na(final_asv_tab$count_relative))
+sum(is.na(final_asv_tab$genus))
+
+#this table has taxonomic assignments for each sample
+write.csv(final_asv_tab,'../data/final_taxonomy.csv',row.names = FALSE)
+
+#we have total of 927 samples with taxonomy available
+
+```
+
+```{r alpha diversity}
+
+#calculate alpha diversity 
+alpha.diversity<-final_asv_tab%>%
+  group_by(sampleid)%>%
+  summarise(shannon=diversity(count_relative, index = "shannon"),
+            simpson=diversity(count_relative, index = "simpson"),
+            simpson_reciprocal=diversity(count_relative,index="invsimpson"))%>%
+  arrange(-shannon)%>%
+  ungroup()
+
+```
+
+```{r dominant taxa}
+#get dominant taxa for each sample
+#create composition table
+
+#there are duplicate combinations of count_relative in the genus columns to pivot the data from long to wide format.
+#Aggregate the values before pivoting
+
+stool_asv_summarized <- final_asv_tab %>%
+  group_by(sampleid, genus) %>%
+  summarise(count_relative = sum(count_relative)) %>%
+  ungroup()%>%
+  filter(!is.na(genus))
+n_distinct(stool_asv_summarized$sampleid)
+
+stool_composition.tab<-stool_asv_summarized%>%
+  pivot_wider(names_from = genus,values_from = count_relative)
+
+# Convert NA to 0 in the dataframe
+stool_composition.tab[is.na(stool_composition.tab)] <- 0
+
+
+####find the most dominant taxa in each sample
+stool_composition <- stool_composition.tab[, -1]
+
+# Find the most dominant taxa per sample
+stool_dominant_taxa <- apply(stool_composition, 1, function(row) {
+  max_taxon <- names(row)[which.max(row)]
+  abundance <- max(row)
+  c(genus = max_taxon, Abundance = abundance)
+})
+
+# Combine the results into a dataframe
+stool_dominant_taxa_df <- as.data.frame(t(stool_dominant_taxa))
+stool_dominant_taxa_df$sampleid <- stool_composition.tab$sampleid
+
+#join with alpha diversity table
+
+microbiome_tab<-full_join(stool_dominant_taxa_df,alpha.diversity,by='sampleid',multiple='all')%>%
+  select(-c(simpson))
+
+#this table has dominant taxa and alpha diversity combined in all 927 samples
+write.csv(microbiome_tab,'../data/taxa_dominant_alpha.csv',row.names = FALSE)
+
+
+```
+
+
+```{r indican combined}
+#load indican data
+indican<-read_excel('../Ruben_data/Eli_Ruben/ruben_urine_data_eli_mod_10-2-23.xlsx', skip=1) %>% clean_names()#378 
+
+#above table doesn't have sampleid.
+#get sampleid from eli's data to make it feasible to join with taxonomy data
+eli_col<-read.csv('../data/gvhd_indican/indican_data.csv')%>%
+  rename(msk_id='sample_id',sampleid='stool_id') %>%
+  select(msk_id,sampleid)
+
+#join table to add sampleid on the table
+indican_data<-left_join(indican,eli_col,by='msk_id')%>%
+  rename(aliquot="sample_id")%>%
+  select(-c(shannon,simpson_reciprocal,abundant_organism))%>%
+  relocate(sampleid, .before = msk_id)%>%
+  filter(!is.na(sampleid))
+
+#add new microbiome data to samples from indican that includes newly sequenced samples
+
+indican_microbiome <-left_join(indican_data,microbiome_tab,by='sampleid')
+
+#this is the newest version of indican and microbiome table
+write.csv(indican_microbiome,'../data/indican_microbiome.csv', row.names=FALSE)
+```
+
+```{r}
+#filter indican data for taxonomy analysis
+#we are only keeping eli's indican_creat value for below or equals to 60 to avoid outliers
+
+indican_microbiome_filtered<-indican_microbiome%>%
+  filter(ruben_exclude_samples=='No',
+         !is.na(eli_indican_conc_umol_mmol_creatinine),
+         eli_indican_conc_umol_mmol_creatinine<=60) %>%
+  rename(ind_cre_MS = ind_cre_ruben_umol_mmol_creatinine,
+         ind_cre_colorimetric = eli_indican_conc_umol_mmol_creatinine)
+
+
+n_distinct(indican_microbiome_filtered$sampleid)
+n_distinct(indican_microbiome_filtered$msk_id)
+n_distinct(indican_microbiome_filtered$aliquot)
+```
+
+```{r tsne}
+#convert overall composition into matrix only selecting samples that are in indican data
+stool_composition.mat<-stool_composition.tab%>%
+  filter(sampleid %in% indican_microbiome_filtered$sampleid)%>%
+  column_to_rownames("sampleid")%>%
+  as.matrix()
+
+
+# Calculate pairwise Bray-Curtis distances
+stool_dist_matrix <- vegdist(stool_composition.mat, method = "bray")
+#print(stool_dist_matrix)
+
+library(Rtsne)
+#tsne-plot
+
+stool_tsne<-Rtsne(stool_dist_matrix,max_iter =5000, perplexity = 25, theta=0.2)
+stool_tsne_df <- data.frame(tsne1 = stool_tsne$Y[,1],
+                      tsne2 = stool_tsne$Y[,2])
+
+####only select sampleids that are in filtered indican data
+stool_dominant_taxa_df_indican<-stool_dominant_taxa_df%>%
+  filter(sampleid %in% indican_microbiome_filtered$sampleid)
+
+#adding taxonomy data
+
+stool_tsne_combined<-cbind(stool_tsne_df,stool_dominant_taxa_df_indican)
+
+```
+
+```{r}
+#get colors from db
+get_table_from_database('asv_annotation_blast_color_ag')
+asv_color_genus<-asv_annotation_blast_color_ag%>% 
+  select(genus,color,color_base,color_label_group,color_label_group_distinct)%>%
+  distinct()
+
+stool.color.tab<-left_join(stool_tsne_combined,asv_color_genus,by='genus')
+stool_genus_color<-stool.color.tab%>%
+  select(color_label_group,color)%>%
+  filter(!duplicated(.),
+         !is.na(color))
+
+st.genus_color_scheme = stool_genus_color$color
+names(st.genus_color_scheme)=stool_genus_color$color_label_group
+
+
+#join indican and stool color tab table
+
+stool.indican <-indican_microbiome_filtered%>%
+  select(-c(genus,Abundance))%>%
+  inner_join(stool.color.tab,by='sampleid',multiple='all')
+
+sum(is.na(stool.indican$genus))
+
+
+stool.indican%>%
+  filter(!is.na(genus))%>%
+  ggplot(aes(x=tsne1, y=tsne2,col=factor(color_label_group)))+
+  geom_point(size = 2.5)+
+  scale_color_manual(name="Most dominant taxa",values = st.genus_color_scheme)+
+  theme_classic()+
+  coord_fixed()
+
+ggsave('../plots/tsne_stool.png')
+
+stool.indican%>%
+  #filter(!is.na(genus))%>%
+  ggplot(aes(x=tsne1, y=tsne2,col=ind_cre_colorimetric))+
+  geom_point(size = 3)+
+  labs(title = 'colometric indican concentration across most dominated taxa groups', color = "[umol/mmol crea]")+
+  scale_color_viridis_c(direction = -1)+
+  coord_fixed()+
+  theme_classic()
+
+ggsave('../plots/tsne_indican_colorimetric.png')
+
+
+stool.indican%>%
+  filter(!is.na(genus))%>%
+  ggplot(aes(x=tsne1, y=tsne2,col=ind_cre_MS))+
+  geom_point(size = 2.5)+
+  labs(title = 'LC-MS 3IS across most dominated taxa groups', color = "[umol/mmol crea]")+
+  scale_color_viridis_c(direction = -1)+
+  coord_fixed()+
+  theme_classic()
+
+ggsave('../plots/tsne_indican_ms.png')
+  
+```
+
+##### we ended up not using the cluster assignment part but I left the script here just in case
+```{r cluster}
+# Specify the number of clusters (k)
+k <- 10
+
+# Apply k-means clustering
+st.kmeans_result <- kmeans(stool_dist_matrix, centers = k)
+
+# Get the cluster assignments
+st.cluster_assignments <- st.kmeans_result$cluster
+
+st.sampleid = rownames(stool_composition.mat)
+
+st.cluster<-data.frame(K=st.cluster_assignments,sampleid=st.sampleid)
+
+#table to provide to Eli
+st.final.tab<-left_join(st.cluster,stool.color.tab,by='sampleid')
+
+
+cluster_colors <-c("#A50026","#D73027","#F46D43","#C2A5CF","#3690C0",
+"#FDAE61","#5AAE61","#B3E2CD","#762A83","#1B7837")
+
+#cluster_color<-final.tab%>%
+  #select(genus,color)%>%
+  #filter(!duplicated(.))
+
+#cluster_color_scheme = cluster_color$color
+#names(cluster_color_scheme)=cluster_color$K
+
+st_cluster<-st.final.tab%>%
+  ggplot(aes(x=tsne1, y=tsne2, col = factor(K)))+
+  geom_point(size = 2)+
+  scale_color_manual(name="Cluster_assignment",values = cluster_colors)+
+  labs(title='Tsne with Bray-Curtis')+
+  theme_classic()+
+  coord_fixed()
+               
+
+st_cluster
+
+ggsave('cluster_assignment.png')
+
+```
+
+```{r top10_genera}
+#get top 10 most abundance genera and their relative abundance per sample
+library(pheatmap)
+
+col_choice=names(sort(colMeans(stool_composition.tab[,-1]),decreasing = T)[1:10])
+
+top10_genus_tbl<-st.final.tab%>%
+  arrange(K)%>%
+  select(sampleid,K)%>%
+  left_join(stool_composition.tab %>% select(sampleid,all_of(col_choice)),by='sampleid')
+
+mat_colors <- list(group = cluster_colors)
+names(mat_colors$group) <- c(1:10)
+hm = data.frame(top10_genus_tbl[,-c(1:2)])
+hm = t(hm)
+hm = apply(hm, c(1,2), as.numeric)
+colnames(hm) = top10_genus_tbl$sampleid
+group = data.frame(group = top10_genus_tbl$K)
+rownames(group) = top10_genus_tbl$sampleid
+pheatmap(log10(hm+0.0001),annotation_col = group, annotation_colors = mat_colors, 
+         show_colnames=FALSE, annotation_legend = F,
+         cluster_cols = F, cluster_rows = T, annotation_col_position="bottom")
+
+```
