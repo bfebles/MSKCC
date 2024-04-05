@@ -1,5 +1,0 @@
-"0","w.test.box+stat_pvalue_manual(w.test,label = 'p')
-"
-"2","Error in .valide_y_position(y.position, data) : 
-  can't find the y.position variable 'y.position' in the data
-"
