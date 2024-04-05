@@ -1,0 +1,229 @@
+---
+title: "Absolute_comp"
+output: html_document
+date: "2023-03-11"
+---
+
+## Load Libraries
+```{r initiate-environment}
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(ggpubr)
+library(vdbR)
+library(patchwork)
+library(readxl)
+library(ggthemes)
+library(rstatix)
+```
+
+```{r}
+#options(scipen=999)
+
+#load dataset
+rel.ab.samp<-read.csv('../data/relab_sample.csv')
+
+#remove string 'group'from relab.ab.samp
+rel.ab.samp$sampleid<-gsub('Group','',rel.ab.samp$sampleid)
+
+#remove lagging white space in sampleid column
+rel.ab.samp$sampleid<-gsub(" ","",rel.ab.samp$sampleid)
+
+rel.ab.samp<-rel.ab.samp%>%rename(SampleID = sampleid)%>%
+  filter(Treatment=='Control' | Treatment == 'Fludarabine')
+str(rel.ab.samp)
+
+rel.ab.samp.adj<-rel.ab.samp%>%
+  group_by(SampleID,genus)%>%
+  mutate(new.relab=sum(count_relative))%>%
+  ungroup()%>%
+  group_by(SampleID)%>%
+  distinct(genus,.keep_all = TRUE)%>%
+  ungroup()
+  
+
+#load qpcr data
+pcr<-read_excel('../data/16SqPCR_Madhu_Request_04252023.xlsx')
+
+
+pcr%>%
+  ggplot(aes(`Sample Weight (g)`,`16S COPY NUMBER`))+
+  geom_point(size = 3)
+
+```
+
+```{r}
+
+
+pcr<-pcr %>% select(SampleID,`16S COPIES/G`)
+str(pcr)
+
+#join pcr and relab tables
+
+join.tab<-left_join(pcr,rel.ab.samp,by='SampleID')
+str(join.tab)
+unique(join.tab$`16S COPIES/G`)
+
+#join.tab %>% filter_at(vars(SampleID),any_vars(. %in% c('2-B-2')))
+
+
+# Scientific notation with two digits
+#join.tab$`16S COPIES/G`<-formatC(join.tab$`16S COPIES/G`, format = "e", digits = 2)
+#join.tab$`16S COPIES/G`<-as.numeric(join.tab$`16S COPIES/G`)
+
+
+#create new column for count_absolute
+join.tab<-join.tab%>%
+  mutate(count_absolute = (count_relative * `16S COPIES/G`))
+
+unique(join.tab$count_absolute)
+```
+
+
+```{r}
+#plot by time
+
+#change the order of time.point
+join.tab$Time_point<-factor(join.tab$Time_point,levels = c("Baseline","1d","4d","7d"))
+
+#add log count column
+abs<-join.tab%>%
+  mutate(log_count.absolute = log10(count_absolute))%>%
+  select(SampleID,`16S COPIES/G`,Treatment,Time_point,genus,color_label_group,count_relative,count_absolute,log_count.absolute)
+
+abs <- abs%>%mutate_if(is.character, as.factor)
+str(abs)
+
+max(abs$log_count.absolute)
+min(abs$log_count.absolute)
+
+min(join.tab$count_absolute)
+max(join.tab$count_absolute)
+
+write.csv(abs,"absolute_count.csv")
+
+my_colors<-join.tab$color_base
+names(my_colors)<-join.tab$color_label_group
+
+Control<-join.tab%>%filter(Treatment=='Control')%>%
+  ggplot(aes(SampleID,count_absolute,fill=factor(color_label_group)))+
+  geom_bar(stat='identity')+
+  facet_grid(~Time_point,scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x= '', y = '16S copies/g', title = '')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  theme(legend.position="none")
+
+Control
+
+Control.log<-abs%>%filter(Treatment=='Control')%>%
+  ggplot(aes(SampleID,log_count.absolute,fill=color_label_group))+
+  geom_bar(stat = 'identity', position = 'dodge')+
+  facet_grid(~Time_point,scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_text(angle = 90))+
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #theme(legend.position = 'bottom')+
+  labs(x= '', y = 'log10(16S copies/g)', title = 'Absolute abundance of Control')+
+  scale_y_continuous(expand = c(0,0))+
+  theme(plot.title = element_text(hjust = 0.5))
+Control.log
+
+Control+Control.log+plot_layout()+plot_annotation('Control Group')
+ggsave('abs.control.pdf',width = 12, height = 10)
+```
+
+```{r}
+
+Flud<-abs%>%filter(Treatment=='Fludarabine')%>%
+  ggplot(aes(SampleID,count_absolute,fill=color_label_group))+
+  geom_bar(stat='identity',width = 1)+
+  facet_grid(~factor(Time_point),scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_text(angle=90))+
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(limits = c(0,3e9))+
+  labs(x= '', y = '16S copies/g', title = '')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  theme(legend.position="none")
+
+Flud
+
+Flud.log<-abs%>%filter(Treatment=='Fludarabine')%>%
+  ggplot(aes(SampleID,log_count.absolute,fill=color_label_group))+
+  geom_bar(stat='identity',position = 'stack', width = 1)+
+  facet_grid(~factor(Time_point),scales = 'free',switch ='x',space = 'free_x')+
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_y_continuous(expand = c(0,0))+
+  labs(x= '', y = 'log(16S copies/g)', title = '')+
+  theme_classic()+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  theme(strip.text.x = element_text(size = 6))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_text(angle=90))+
+  theme(plot.title = element_text(hjust = 0.5))
+
+Flud.log
+
+Flud+Flud.log+plot_layout()+plot_annotation('Fludarabine Group')
+ggsave('abs.fludarabine.pdf',width = 12, height = 10)
+
+```
+
+```{r}
+#wilcox.test(fludarabine_day1 ~ fludarabine_baseline, paired = TRUE)
+ 
+tab.test<-join.tab%>%
+  filter(Treatment=='Fludarabine')%>%
+  filter(Time_point=='Baseline' | Time_point == '1d')%>%
+  select(Time_point,count_absolute)
+  
+wilcox.test(count_absolute ~ Time_point, data = tab.test, paired = T)
+
+```
+
+```{r}
+#fold change between fludarabine day 1 and fludarabine day 0
+
+fold.flud<-join.tab%>%
+  filter(Treatment=='Fludarabine',Time_point=='Baseline' | Time_point == '1d')
+  
+fold.flud.1<-fold.flud%>%
+  group_by(Time_point)%>%
+  summarise(count_abs = mean(count_absolute))%>%
+  pivot_wider(names_from = Time_point,values_from = count_abs)%>%
+  mutate(fold_change= `1d`/Baseline)
+
+  
+#fold change between control day 1 and control day 0
+
+fold.pbs<-join.tab%>%
+  filter(Treatment=='Control',Time_point=='Baseline' | Time_point == '1d')
+  
+fold.pbs.1<-fold.pbs%>%
+  group_by(Time_point)%>%
+  summarise(count_abs = mean(count_absolute))%>%
+  pivot_wider(names_from = Time_point,values_from = count_abs)%>%
+  mutate(fold_change= `1d`/Baseline)
+
+#wilcox test between fold change of fludarabine and pbs
+wilcox.test(fold.flud.1$fold_change,fold.pbs.1$fold_change, paired=T)
+
+```
+
+

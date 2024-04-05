@@ -1,0 +1,272 @@
+---
+title: "Beta_diversity_chemo"
+output: html_document
+date: "2023-03-03"
+---
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(labdsv)
+library(readxl)
+library(patchwork)
+library(RColorBrewer)
+library(ggpubr)
+library(ape)
+library(ggplot2)
+```
+
+```{r}
+meta_data<-read_excel('../data/Submission of samples for 16S_Peled_6232022_Sample details.xlsx')
+count_data<-read.csv('../data/asv_count.csv')
+tax_data<-read.csv('../data/asv_taxonomy.csv')
+```
+
+```{r data manipulation}
+#rename colnames in metadata
+meta_data<-meta_data%>%
+  rename(oligos_id = `Tube Barecode`,sampleid = `Unique Sample ID`,Treatment=Condition,Time_point=`Time point`)%>%
+  mutate(Treatment_group = case_when(
+    #grepl("antibiotics",`Day of Stool Collection`) ~ "antibiotics",
+    #grepl("treatments", `Day of Stool Collection`) ~ "chemotherapy",
+    #grepl("treatment", `Day of Stool Collection`) ~ "chemotherapy",
+    Treatment == 'Fludarabine' ~ 'chemotherapy',
+    Treatment == 'Melphalan' ~ 'chemotherapy',
+    Treatment == 'Busulfan' ~ 'chemotherapy',
+    Treatment == 'Cyclophosamide' ~ 'chemotherapy',
+    Treatment == 'TBI' ~ 'chemotherapy',
+    Treatment == 'Flouroquinolone' ~ 'antibiotics',
+    Treatment == 'VAMN' ~ 'antibiotics', 
+    TRUE ~ Treatment
+  ))
+
+#create sep df to join asv count table
+samples<-meta_data%>%
+  select(oligos_id,sampleid,Treatment,Treatment_group,Time_point)%>%
+  filter(Treatment_group=='chemotherapy' | Treatment_group=='Control')
+
+distinct(samples, oligos_id)
+distinct(count_data,oligos_id)
+
+asv_tab<-left_join(samples,count_data,by = 'oligos_id')%>%
+  select(-oligos_id)
+
+distinct(asv_tab,sampleid)
+
+#check count of missing values
+sum(is.na(asv_tab))
+which(is.na(asv_tab))
+
+#remove rows with missing values
+asv_dat<-na.omit(asv_tab)
+sum(is.na(asv_dat))
+
+#join count and asv data
+
+asv_count_tab<-left_join(asv_dat,tax_data,by = 'asv_id')
+
+sum(is.na(asv_count_tab))
+which(is.na(asv_count_tab))
+
+#remove rows with missing values
+asv_count_dat<-na.omit(asv_count_tab)
+sum(is.na(asv_count_dat))
+which(is.na(asv_count_dat))
+
+#genus col had some empty rows.Remove empty rows from genus col
+asv_count_dat<-asv_count_dat[!asv_count_dat$genus=="",]
+
+head(asv_count_dat)
+
+```
+
+```{r betadiv, eval=RECOMPUTE_TSNE}
+dt_count = data.table(sampleid = asv_count_dat$sampleid,
+                      taxonomy = asv_count_dat$genus,
+                      count = asv_count_dat$count)
+
+dt_count[, count_total := sum(count), by=.(sampleid)]
+dt_count$count_relative = dt_count$count/dt_count$count_total
+
+write.csv(dt_count,'../chemo_bray/rel.data.csv',row.names = FALSE)
+
+t1=Sys.time()
+composition_matrix = dcast.data.table(data = dt_count %>% 
+                                        filter(count_relative > 2e-3) %>% 
+                                        mutate(nsamples=n_distinct(sampleid) ) %>%
+                                        group_by(taxonomy) %>% filter(n_distinct(sampleid)/nsamples >= .05) %>% ungroup() %>% as.data.table(),
+                                      formula = sampleid ~ taxonomy,
+                                      value.var = "count_relative",
+                                      fun.aggregate = sum,
+                                      fill = 0)
+composition_matrix = data.frame(composition_matrix)
+
+write.csv(composition_matrix,'../chemo_bray/Rel.composition_table.csv',row.names = FALSE)
+row_names = composition_matrix$sampleid
+
+t1=Sys.time();
+#row.names(composition_matrix) = composition_matrix$sampleid;
+composition_matrix = composition_matrix[, 2:dim(composition_matrix)[2]];
+rownames(composition_matrix) = row_names;
+t2=Sys.time();
+cat("Time:Composition_matrix:\n")
+print(t2-t1);
+
+
+t1=Sys.time();
+method="bray/curtis";
+d_beta =labdsv::dsvdis(composition_matrix, method);
+d_beta = as.matrix(d_beta);
+t2=Sys.time();
+cat("Time:Bray-Curtis matrix:\n")
+print(t2-t1)
+save(list = c("d_beta"), file = "../chemo_bray/d_beta")
+```
+
+## MDS dists
+```{r}
+load("../chemo_bray/d_beta")
+
+#get PCoA axis
+
+if (file.exists("../chemo_bray/pca_mds")){
+  load("../chemo_bray/pca_mds")
+} else{
+  t1=Sys.time()
+  beta_mds <- ape::pcoa(d_beta)
+  t2=Sys.time()
+  cat("Time:MDS\n")
+  print(t2-t1);
+  save(list="beta_mds", file = "../chemo_bray/pca_mds")
+}
+mds_df <- left_join(as.data.frame(beta_mds$vector) %>% rownames_to_column("sampleid"), samples) %>%
+  rename(
+    PCoA1 = Axis.1,
+    PCoA2 = Axis.2,
+         ) 
+
+mds_df
+
+#PCoA plot
+```
+
+```{r}
+ggplot(mds_df, aes(x=PCoA1, y=PCoA2,color=Treatment)) + geom_point(size = 2.5)+ 
+  facet_wrap(~factor(Time_point,levels=c('Baseline','1d','4d','7d')))+
+  theme(strip.text = element_text(face = 'bold'))+
+  scale_color_brewer(palette = 'Paired')+
+  theme(legend.position = 'right')+
+  theme(legend.text = element_text(size = 10))+
+  theme(legend.title = element_text(size = 10,face = 'bold'))+
+  theme_dark()
+
+ggsave('../chemo_bray/PCoA_chemo_cond.pdf',width = 10, height = 8)
+
+
+distinct(mds_df,sampleid)
+
+#Get the mean Axis1 per group, get the mean axis2 per group, within the set of samples of interest (in this case the baseline samples)
+mds_baseline_centers <- mds_df %>% 
+  group_by(sampleid)%>%
+  filter(Time_point=='Baseline')%>% 
+  group_by(Treatment,Treatment_group) %>%
+  summarize(
+    grp_init_t1_scaled =mean(PCoA1),
+    grp_init_t2_scaled =mean(PCoA2))
+
+mds_baseline_centers
+
+axes_percents <- sapply(1:length(beta_mds$values$Relative_eig), function(x){paste0("PCo ", x, ": ", round(beta_mds$values$Relative_eig[x] * 100, 2), "%")})
+barplot(beta_mds$values$Relative_eig[1:10] )
+
+#calculate the per-sample distance from its axis1 and axis2 from the mean_axis1 and mean_axis2 using the euclidean distance
+mds_baseline_centers_dists <- mds_df %>% 
+  left_join(., mds_baseline_centers) %>%
+  group_by(sampleid,Treatment,Treatment_group) %>%
+  summarize(
+    mean_t1_scaled_post =mean(PCoA1),
+    mean_t2_scaled_post =mean(PCoA2),
+    mean_scaled_dist = sqrt(((mean_t1_scaled_post -  grp_init_t1_scaled)^2) +((mean_t2_scaled_post -  grp_init_t2_scaled)^2))
+    ) %>% distinct()
+mds_baseline_centers_dists
+
+
+str(mds_baseline_centers_dists)
+
+#mds_baseline_centers_dists$Treatment<-factor(mds_baseline_centers_dists$Treatment,c('Control','Cyclophosamide','TBI','Busulfan','Fludarabine','Melphalan'))
+mds_baseline_centers_dists$Treatment_group<-as.factor(mds_baseline_centers_dists$Treatment_group)
+
+
+
+
+(p_mds_changes <- ggplot(mds_baseline_centers_dists,
+                                     aes(x=reorder(Treatment,mean_scaled_dist), y=mean_scaled_dist,color=Treatment)) + 
+    geom_boxplot(outlier.colour = NA, size=1) +
+    geom_jitter(width = 0.1,alpha=0.5, size = 1.5)  + 
+    scale_color_brewer(palette = 'Dark2', guide="none") + 
+    labs(x="Conditioning Regimen", y="PCoA Distance", color="Treatment", 
+        shape="Treatment_group") +
+ theme_minimal()+
+  theme(text= element_text( size = 12), plot.caption = element_text(hjust=0),
+        legend.title=element_blank(),
+        axis.line = element_line(),
+        legend.position = 'right',
+        axis.text.x = element_text( angle = 45, hjust = 1 ),
+        plot.margin=unit(c(0.5,2,0.5,0.5),"cm"))  +   
+    labs(x='Treatment',y='Distance from Baseline Centroid')+
+    ggpubr::stat_compare_means (
+      method = "wilcox.test",
+      paired = FALSE,
+      label.y = c(1),
+      ref.group = "Cyclophosamide",
+      label="p.format",
+      color="black")
+    
+)  
+
+ggsave('../chemo_bray/distance from centroid_chemo.pdf', width = 8, height = 6)
+```
+
+```{r}
+#by time
+mds_baseline_dists_time <- mds_df %>% 
+  left_join(., mds_baseline_centers) %>%
+  group_by(sampleid,Treatment,Treatment_group,Time_point) %>%
+  #filter(Treatment!='Control')%>%
+  summarize(
+    mean_t1_scaled_post =mean(PCoA1),
+    mean_t2_scaled_post =mean(PCoA2),
+    mean_scaled_dist = sqrt(((mean_t1_scaled_post -  grp_init_t1_scaled)^2) +((mean_t2_scaled_post -  grp_init_t2_scaled)^2))
+    ) %>% distinct()
+
+mds_baseline_dists_time
+```
+
+```{r}
+(p_mds_chemo_time <- ggplot(mds_baseline_dists_time,
+                                     aes(x=reorder(Treatment,mean_scaled_dist), y=mean_scaled_dist,color=Treatment)) + 
+    geom_boxplot(outlier.colour = NA, size=1) +
+    geom_jitter(width = 0.05, height = 0.05, alpha=0.5, size = 1.5)  + 
+    scale_color_brewer(palette = 'Dark2', guide="none") + 
+    facet_wrap(~factor(Time_point),ncol = 1,face='bold')+
+    labs(x="Conditioning Regimen", y="PCoA Distance", color="Treatment", 
+        shape="Treatment_group") +
+   theme_minimal()+
+  theme(text= element_text( size = 12), plot.caption = element_text(hjust=0),
+        legend.title=element_blank(),
+        axis.line = element_line(),
+        legend.position = 'right',
+        plot.title = element_text(hjust = 0.5, face = 'bold'),
+        axis.text.x = element_text( angle = 45, hjust = 1 ))+
+        #plot.margin=unit(c(0.5,2,0.5,0.5),"cm"))  +   
+    labs(x='',y='Distance from Baseline Centroid')+
+    ggpubr::stat_compare_means (
+      method = "wilcox.test",
+      paired = FALSE,
+      label.y = c(1),
+      ref.group = "Control",
+      label="p.format",
+      color="black")
+)  
+
+```

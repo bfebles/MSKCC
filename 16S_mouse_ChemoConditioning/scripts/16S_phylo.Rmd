@@ -1,0 +1,282 @@
+---
+title: "16S_phyloseq"
+output: html_document
+date: `r format(Sys.Date(), "%B %d, %Y")`
+---
+
+```{r}
+library(microViz)
+library(phyloseq)
+library(microbiome)
+library(knitr)
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(ggpubr)
+library(readxl)
+library(patchwork)
+```
+
+```{r}
+count_table<-read.csv('asv_count.csv')
+#which(duplicated(count_table$ASVId) == TRUE)
+met_tab<-read_excel("Submission of samples for 16S_Peled_6232022_Sample details.xlsx")
+
+sample_id<-met_tab%>%
+  select(`Tube Barecode`,`Unique Sample ID`)%>%
+  rename(oligos_id = `Tube Barecode`,sample_id = `Unique Sample ID`)
+
+asv_tab<-left_join(sample_id,count_table,by = 'oligos_id')%>%
+  select(-oligos_id)%>%
+  drop_na(asv_id)
+
+#check if there is any NA
+asv_tab%>%
+  summarise(count=sum(is.na(asv_id)))
+
+asv_mat<-asv_tab%>%
+  group_by(sample_id)%>%
+  spread(sample_id,count)
+  #pivot_wider(names_from = sample_id, values_from = count)%>%
+
+#check unique asvid  
+n_distinct(asv_tab$asv_id)
+
+#replace NA with 0
+asv_mat[is.na(asv_mat)] <- 0
+
+which(duplicated(asv_mat$asv_id) == TRUE)
+#print(rownames(asv_mat))
+
+class(asv_mat)
+asv_mat<-tibble::column_to_rownames(asv_mat,var="asv_id")
+
+asv_mat<-as.matrix(asv_mat)
+```
+
+```{r}
+tax_tab<-read.csv('asv_taxonomy.csv')
+
+n_distinct(tax_tab$asv_id)
+class(tax_tab)
+tax_tab<-tax_tab%>%
+  tibble::column_to_rownames("asv_id")
+
+tax_mat<-as.matrix(tax_tab)
+```
+
+```{r}
+# rename sample if column and create new column based on the treatments
+
+samples_df<-met_tab%>%
+  rename(sample_id=`Unique Sample ID`, Treatment = Condition)%>%
+  mutate(Treatment_group = case_when(
+    #grepl("antibiotics",`Day of Stool Collection`) ~ "antibiotics",
+    #grepl("treatments", `Day of Stool Collection`) ~ "chemotherapy",
+    #grepl("treatment", `Day of Stool Collection`) ~ "chemotherapy",
+    Treatment == 'Fludarabine' ~ 'chemotherapy',
+    Treatment == 'Melphalan' ~ 'chemotherapy',
+    Treatment == 'Busulfan' ~ 'chemotherapy',
+    Treatment == 'Cyclophosamide' ~ 'chemotherapy',
+    Treatment == 'TBI' ~ 'chemotherapy',
+    Treatment == 'Flouroquinolone' ~ 'antibiotics',
+    Treatment == 'VAMN' ~ 'antibiotics', 
+    TRUE ~ Treatment
+  ))
+
+str(samples_df)
+samples_df$`Time point`<-as.factor(samples_df$`Time point`)
+samples_df$Treatment<-as.factor(samples_df$Treatment)
+samples_df$Treatment_group<-as.factor(samples_df$Treatment_group)
+
+samples_df<-samples_df%>%
+  tibble::column_to_rownames("sample_id")
+
+```
+
+```{r}
+OTU = otu_table(asv_mat,taxa_are_rows = TRUE)
+TAX=tax_table(tax_mat)
+samples=sample_data(samples_df)
+
+ms.chemo<-phyloseq(OTU,TAX,samples)
+
+```
+
+```{r}
+sample_names(ms.chemo)
+rank_names(ms.chemo)
+sample_variables(ms.chemo)
+summarize_phyloseq(ms.chemo)
+ms.chemo
+```
+
+```{r filter-taxa}
+# Create table, number of features for each genera
+
+table(tax_table(ms.chemo)[, "genus"], exclude = NULL)
+
+#remove features with NA and empty spaces
+ms.chemo<-subset_taxa(ms.chemo, !is.na(genus) & !genus %in% c("","uncharacterized"))
+get_taxa_unique(ms.chemo,'genus')
+
+any(taxa_sums(ms.chemo) == 0)
+ms.chemo
+#check sample and taxa names are consistent across phyloseq object and fix if there are any problems. also subset phyloseq with only samples present in metadata
+ms.chemo<-phyloseq_validate(ms.chemo,remove_undetected = TRUE)
+ps1<-tax_fix(ms.chemo)
+ps1
+```
+
+```{r}
+#community composition plotting testing
+
+#Make it relative abundance
+ps1.rel<-microbiome::transform(ps1,'compositional')
+p.phy<-ps1.rel%>%
+  aggregate_taxa(level = 'genus')
+p.phy
+
+#select more colors 
+cols<-600
+mycolors<-colorRampPalette(brewer.pal(8, "Paired"))(cols)
+
+plot<-plot_composition(p.phy)+
+  guides(fill = guide_legend(ncol = 1)) +
+  scale_fill_manual('genus',values=mycolors)+
+  scale_y_continuous(expand=c(0,0))+
+  labs(x='Samples',y='Relative Abundance')+
+  theme(axis.text.x = element_text(angle=90, hjust=1),
+        legend.text = element_text(face = "italic"))+
+  theme(axis.text=element_text(size=10))+
+  theme(axis.title = element_text(size = 10, face = 'bold'))+
+  theme(legend.text = element_text(size = 8))+
+  theme(legend.title = element_text(size = 8))
+plot
+```
+
+```{r}
+#overall microbiome composition
+ps1.rel %>%
+  #ps_filter(Time.point == '7d')%>%
+  comp_barplot("genus",n_taxa = 10, merge_other = FALSE, label =NULL,
+               bar_outline_colour = "NA", sample_order = "bray")+
+  facet_wrap(vars(Treatment), scales = "free")+
+  coord_flip()+
+  theme(axis.ticks.y = element_blank(), strip.text = element_text(face = "bold"))
+
+ggsave('overall_compositional.pdf',width = 20,height = 10) 
+
+```
+
+
+
+```{r alpha diversity}
+plot_richness(ps1.rel, x = "Time.point", color = "Treatment_group", measures = "InvSimpson")+
+  stat_compare_means(method = "wilcox.test")+
+  geom_boxplot(outlier.shape = NA, alpha = 0.6)+
+  geom_jitter(size = 2, alpha = 0.5, width = 0.2)+
+  theme(legend.position = 'bottom',axis.text.x=element_text(angle=45,hjust=1,vjust=1,size=12))
+
+```
+
+```{r beta diversity}
+# perform ordination
+
+pcoa <- ps1 %>%
+  tax_filter(tax_level = 'genus')%>%
+  tax_agg( "genus") %>%
+  tax_transform("identity", rank = "genus")%>%
+  dist_calc("bray") %>%
+  ord_calc(method = "PCoA",constraints = NULL) %>%
+  ord_plot(
+    plot_taxa = 1:3,colour = "Treatment_group", size = 3, shape = "Time.point")+
+    scale_color_brewer(palette="Dark2")
+pcoa
+
+
+custom.plot<-pcoa+
+  stat_ellipse(aes(linetype=Treatment_group,colour=Treatment_group),linewidth=0.5)+
+  scale_color_brewer(palette='Dark2')+
+  theme(legend.position = 'right')+
+  coord_fixed(ratio = 0.5, clip = "off")
+  #labs(x="PCoA[24.1%]", y= "PCoA[15.3%]")
+
+custom.plot
+
+ggsave("PCoA.plot.pdf",width = 10, height=5)
+```
+
+```{r}
+
+pcoa <- ps1 %>%
+  tax_transform("identity", rank = "genus")%>%
+  dist_calc("bray") %>%
+  ord_calc(method = "PCoA") %>%
+  ord_plot(
+    colour = "Treatment", shape = 'Treatment_group', size = 3)+
+    scale_color_brewer(palette = "Dark2")
+pcoa
+
+col=scale_color_brewer(palette = 'Dark2')
+custom.plot<-pcoa+
+ #stat_ellipse(aes(linetype=Treatment_group,colour=Treatment),linewidth=0.7)+
+  #scale_color_manual(values = col, limits=
+                      # c('Control','Busulfan','Cyclophosamide','Fludarabine','Melphalan','TBI','Flouroquinolone','VAMN'))+
+  theme(legend.position = 'right')+
+  theme(legend.text = element_text(size = 10))+
+  theme(legend.title = element_text(size = 10,face = 'bold'))+
+  facet_wrap(~Time.point, ncol = 1)+
+  theme(strip.text = element_text(face = 'bold'))+
+  coord_fixed(ratio = 0.5, clip = "off")
+  #labs(x="PCoA[23.3%]", y= "PCoA[15.7%]")
+
+custom.plot
+
+ggsave('PCoA.group.pdf', width = 10, height = 12)
+```
+
+```{r}
+#pcoa for samples from day 0
+samp1<-ps_filter(ps1,Time.point == 0,.keep_all_taxa = FALSE)
+samp1
+
+pcoa1<-samp1%>%
+  tax_transform('identity',rank = 'genus')%>%
+  dist_calc("bray")%>%
+  ord_calc("PCoA")%>%
+  ord_plot(plot_taxa = 1:3,colour="Treatment",shape='Treatment_group', size = 3)+
+  scale_color_brewer(palette = 'Dark2')
+pcoa1  
+
+
+pcoa1+
+  #stat_ellipse(aes(linetype=Treatment_group,colour=Treatment),linewidth=0.7)+
+  #scale_color_manual(values = col, limits = c('Control','Busulfan','Cyclophosamide','Fludarabine','Melphalan','TBI','Flouroquinolone','VAMN'))+
+  theme(legend.position = 'right')+
+  theme(legend.text = element_text(size = 10))+
+  theme(legend.title = element_text(size = 10,face = 'bold'))
+
+
+```
+
+```{r}
+
+test<- ordinate(ps1, "PCoA", "bray")
+test
+
+p1 = plot_ordination(ps1, test, type="samples", color= 'Treatment',shape="Treatment_group")
+p1
+
+p1+
+  #stat_ellipse(aes(linetype=Treatment_group,colour=Treatment),linewidth=0.7)+
+  scale_color_brewer(palette = 'Dark2')+
+  theme(legend.position = 'right')+
+  theme(legend.text = element_text(size = 10))+
+  theme(legend.title = element_text(size = 10,face = 'bold'))+
+  facet_wrap(~Time.point, ncol = 1)+
+  theme(strip.text = element_text(face = 'bold'))+
+  coord_fixed(ratio = 0.5, clip = "off")
+  coord_fixed(ratio = 0.5, clip = "off")+
+  theme_classic()
+```

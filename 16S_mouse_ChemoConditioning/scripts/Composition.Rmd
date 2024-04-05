@@ -1,0 +1,212 @@
+---
+title: "Composition"
+output: html_document
+---
+```{r}
+devtools::install_git("https://github.mskcc.org/vdblabinternal/vdbr.git")
+```
+## Load Libraries
+```{r initiate-environment}
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(ggpubr)
+library(vdbR)
+library(patchwork)
+library(readxl)
+```
+
+```{r}
+connect_database()
+list_table_from_database(pattern = '*')
+get_table_from_database('asv_annotation_blast_color_ag')
+distinct(asv_annotation_blast_color_ag,genus)
+
+
+#get unique color from database for each taxa
+asv_color_genus<-asv_annotation_blast_color_ag%>% 
+  select(genus,color,color_base,color_label_group,color_label_group_distinct)%>%
+  distinct()
+```
+
+```{r}
+#load dataset
+rel.ab<-read.csv('../data/rel.data.csv',stringsAsFactors = TRUE)
+meta_data<-read.csv('../data/revised_metadata.csv',stringsAsFactors = TRUE, header = TRUE)
+colnames(meta_data)
+meta_data<-meta_data%>%
+  select(sampleid,Treatment,Time_point,Treatment_group)
+
+#join relative abundance table and metadata
+relab.data<-left_join(rel.ab,meta_data,by='sampleid')
+str(relab.data)
+
+
+
+#only get top 20 relative abundance from each sample
+
+relab2<-relab.data%>%
+  arrange(desc(count_relative))%>%
+  group_by(sampleid)%>%
+  slice(1:20)%>%
+  rename(genus='taxonomy')%>%
+  ungroup()
+relab2
+
+
+
+#check if all genus in metadata is in asv database
+test<-anti_join(relab2,asv_color_genus,by='genus')
+distinct(test,genus)
+# there are 16 genus that are not present in color database.
+```
+
+```{r}
+#add missing genus color base to asv database 
+new_asv_color_genus<-asv_color_genus%>%
+  add_row(genus='Duncaniella',color='#7fbebe',color_base='#51AB9B',color_label_group='p__Bacteroidetes',color_label_group_distinct='p__Bacteroidetes.100')%>%
+  add_row(genus='Sangeribacter',color='#b9dbdb',color_base='#51AB9B',color_label_group='p__Bacteroidetes',color_label_group_distinct='p__Bacteroidetes.101')%>%
+  add_row(genus='Enterocloster',color='#f3c3c0',color_base='#EC9B96',color_label_group='f__Lachnospiraceae',color_label_group_distinct='f__Lachnospiraceae.51')%>%
+   add_row(genus='Guopingia',color='#B6B2B0',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.400')%>%
+  add_row(genus='Sporofaciens',color='#efafab',color_base='#EC9B96',color_label_group='f__Lachnospiraceae',color_label_group_distinct='f__Lachnospiraceae.52')%>%
+  add_row(genus='Mediterraneibacter',color='#f5cdca',color_base='#EC9B96',color_label_group='f__Lachnospiraceae',color_label_group_distinct='f__Lachnospiraceae.53')%>%
+  add_row(genus='Mariniplasma',color='#B6B2B1',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.401')%>%
+  add_row(genus='Bilifractor',color='#f1b9b5',color_base='#EC9B96',color_label_group='f__Lachnospiraceae',color_label_group_distinct='f__Lachnospiraceae.54')%>%
+  add_row(genus='Thomasclavelia',color='#B6B2B2',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.402')%>%
+  add_row(genus='Neglectibacter',color='#B6B2B2',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.403')%>%
+  add_row(genus='Marasmitruncus',color='#ffa969',color_base='#FF7106',color_label_group='f__Ruminococcaceae',color_label_group_distinct='f__Ruminococcaceae.31')%>%
+  add_row(genus='Qiania',color='#B6B2B3',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.404')%>%
+  add_row(genus='Marseillibacter',color='#B6B2B3',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.404')%>%
+  add_row(genus='Vescimonas',color='#B6B2B4',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.405')%>%
+  add_row(genus='Fusimonas',color='#B6B2B4',color_base='#B6B2B0',color_label_group='other__other',color_label_group_distinct='other__other.405')%>%
+  add_row(genus='Rahnella',color='#c47171',color_base='#AB3535',color_label_group='p__Proteobacteria',color_label_group_distinct='p__Proteobacteria.100')
+```
+
+```{r}
+my_colors<-new_asv_color_genus$color
+str(my_colors)
+names(my_colors)<-new_asv_color_genus$color_label_group
+names(my_colors)
+```
+
+```{r}
+#join relative abundance table and color set from new color table
+relab3<-left_join(relab2,new_asv_color_genus,by='genus')
+str(relab3)
+distinct(relab3,genus)
+
+#relab4<-na.omit(relab3). shouldn't remove NA's because of lack of color schemes in the database.
+
+
+#convert all character col to factor
+relab3[sapply(relab3, is.character)] <- lapply(relab3[sapply(relab3, is.character)], as.factor)
+str(relab3)
+
+# fludarabine seems to have induced Lachnospiraceae on day 1. 
+fludarabine<-relab3%>%
+  filter(Time_point=='1d', Treatment =='Fludarabine')%>%
+  select(sampleid,Time_point,Treatment,genus,color_label_group, count_relative)
+
+write.csv(fludarabine,'Fludarabine_day1.csv') 
+
+```
+
+
+```{r}
+#plot
+ggplot(relab3,aes(sampleid,count_relative))+
+  geom_bar(aes(fill=color_label_group),stat='identity',position = 'fill',width = 1)+
+  scale_fill_manual(values = my_colors, guide=guide_legend(reverse = FALSE))+
+  scale_colour_manual(values=NA)+
+  facet_grid(~Treatment,scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  theme(strip.text.x = element_text(size = 10))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_text(angle=90),
+        legend.position = "right") +
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x= 'Treatment Group', y = 'Relative Abundance')
+  
+```
+
+```{r}
+#plot by time
+
+d0<-relab3%>%filter(Time_point=='Baseline')%>%
+  ggplot(aes(sampleid,count_relative,fill=color_label_group))+
+  geom_bar(stat='identity',position = 'fill',width = 1)+
+  facet_grid(~factor(Treatment),scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_blank(),
+        legend.position = "right") +
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x= '', y = 'Relative Abundance', title = 'Baseline')+
+  theme(plot.title = element_text(hjust = 0.5))
+d0
+
+d1<-relab3%>%filter(Time_point=='1d')%>%
+  ggplot(aes(sampleid,count_relative,fill=color_label_group))+
+  geom_bar(stat='identity',position = 'fill',width = 1)+
+  facet_grid(~factor(Treatment),scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_blank(),
+        legend.position = "right") +
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x= '', y = 'Relative Abundance', title = 'Day 1 of Treatment')+
+  theme(plot.title = element_text(hjust = 0.5))
+d1
+#ggsave('Day1.pdf', width = 10, height = 8)
+
+d4<-relab3%>%filter(Time_point=='4d')%>%
+  ggplot(aes(sampleid,count_relative,fill=color_label_group))+
+  geom_bar(stat='identity',position = 'fill',width = 1)+
+  facet_grid(~factor(Treatment),scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_blank(),
+        legend.position = "right") +
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x= '', y = 'Relative Abundance', title = 'Day 4 of Treatment')+
+  theme(plot.title = element_text(hjust = 0.5))
+d4
+#ggsave('Day4.pdf', width = 10, height = 8)
+
+d7<-relab3%>%filter(Time_point=='7d')%>%
+  ggplot(aes(sampleid,count_relative,fill=color_label_group))+
+  geom_bar(stat='identity',position = 'fill',width = 1)+
+  facet_grid(~factor(Treatment),scales = 'free',switch ='x',space = 'free_x')+
+  theme(strip.background =element_rect(fill="black"))+
+  theme(strip.text = element_text(colour = 'white',face = 'bold'))+
+  #theme(strip.text.x = element_text(size = 8))+
+  theme(strip.placement = 'outside')+
+  theme(axis.text.x = element_blank(),
+        legend.position = "right") +
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  #scale_color_brewer(palette = 'Paired')+
+  scale_y_continuous(expand = c(0,0))+
+  labs(x= '', y = 'Relative Abundance', title = 'Day 7 of Treatment')+
+  theme(plot.title = element_text(hjust = 0.5))
+d7
+#ggsave('Day7.pdf', width = 10, height = 8)
+
+d0+d1+d4+d7+plot_layout(ncol = 1)
+
+ggsave('../plots/rel.abundance by time point_final.pdf', width = 20, height = 20)
+
+```

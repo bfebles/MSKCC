@@ -1,0 +1,184 @@
+---
+title: "Data_cleaning"
+output: html_document
+date: `r format(Sys.Date(), "%B %d, %Y")`
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.width=15,
+                      fig.height=10,
+                      fig.path="./figures/",
+                      dev='png',
+                      warning=FALSE,
+                      message=FALSE)
+```
+## Load Libraries
+```{r initiate-environment}
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(ggpubr)
+library(readxl)
+```
+
+```{r asvs taxonomy}
+#load taxonomy table
+feat.1155.L1<-read.csv("data/1155_L001/1155_L001_asv_annotated.txt", header = TRUE, sep = "\t")
+feat.1155.L2<-read.csv("data/1155_L002/1155_L002_asv_annotated.txt", header = TRUE, sep = "\t")
+
+#intersect(feat.1155.L1,feat.1155.L2)
+
+#merge two table by unique asvID
+feat.1155<-bind_rows(feat.1155.L2,feat.1155.L1)%>%
+  select(asv_temp_id,annotation)%>%
+  distinct(asv_temp_id,.keep_all = TRUE)
+
+n_distinct(feat.1155$asv_temp_id)
+
+#load feature table from second pool
+feat.1156.L1<-read.csv("data/1156_L001/1156_L001_asv_annotated.txt", header = TRUE, sep = "\t")
+feat.1156.L2<-read.csv("data/1156_L002/1156_L002_asv_annotated.txt", header = TRUE, sep = "\t")
+
+#intersect(feat.1156.L1,feat.1156.L2)
+
+#merge two table by unique asvID
+feat.1156<-bind_rows(feat.1156.L1,feat.1156.L2)%>%
+  select(asv_temp_id,annotation)%>%
+  distinct(asv_temp_id,.keep_all = TRUE)
+
+n_distinct(feat.1156$asv_temp_id)
+
+#combine two pools together while keeping unique asvs
+feat<-bind_rows(feat.1155,feat.1156)%>%
+  rename(asv_id = asv_temp_id)%>%
+  distinct(asv_id,.keep_all = TRUE)
+
+n_distinct(feat$asv_id)
+
+feat<-separate(feat,col = annotation,into = c('kingdom','phylum','class','order','family','genus','species'), sep = "\\;")
+
+feat$kingdom <-gsub("k__","",as.character(feat$kingdom)) 
+feat$phylum <-gsub("p__","",as.character(feat$phylum))
+feat$class <-gsub("c__","",as.character(feat$class))
+feat$order <-gsub("o__","",as.character(feat$order))
+feat$family <-gsub("f__","",as.character(feat$family))
+feat$genus <-gsub("g__","",as.character(feat$genus))
+feat$species <-gsub("s__","",as.character(feat$species))
+
+n_distinct(feat$asv_id)
+write.csv(feat,"asv_taxonomy.csv", row.names = FALSE)
+```
+
+```{r asvs count table}
+## Load files from two separate lanes and combine together for pool 1155
+
+Lane1.1155<-read.csv("data/1155_L001/1155_L001_asv_counts.tsv")
+Lane2.1155<-read.csv("data/1155_L002/1155_L002_asv_counts.tsv")
+
+pool_1155_count<-bind_rows(Lane1.1155,Lane2.1155)
+
+#check distinct asvs
+n_distinct(pool_1155_count$asv_md5)
+
+count.1155<-pool_1155_count%>%
+  group_by(oligos_id,asv_md5)%>%
+  summarise_all(., sum, na.rm = TRUE)%>%
+  rename(asv_id = asv_md5)
+
+#check distinct asvs
+n_distinct(count.1155$asv_id)
+
+which(duplicated(count.1155$oligos_id) == TRUE)
+
+Lane1.1156 <-read.csv("data/1156_L001/1156_L001_asv_counts.tsv")
+Lane2.1156 <-read.csv("data/1156_L002/1156_L002_asv_counts.tsv")
+
+pool_1156_count<-bind_rows(Lane1.1156,Lane2.1156)
+
+count.1156<-pool_1156_count%>%
+  group_by(oligos_id, asv_md5)%>%
+  summarise_all(., sum, na.rm = TRUE)%>%
+  rename(asv_id = asv_md5)
+
+#check distinct asvs
+n_distinct(count.1156$asv_id)
+
+count_table<-bind_rows(count.1155,count.1156)
+
+which(duplicated(count_table$asv_id) == TRUE)
+
+n_distinct(count_table$asv_id)
+
+write.csv(count_table,"asv_count.csv", row.names = FALSE)
+
+#count table has 6288 unique asvs and feat table had 6254.
+#check which asvs from count_table not present in feat table
+
+anti_join(count_table,feat, by = 'asv_id')
+
+
+```
+```{r}
+#get total sum of count
+asv_total.counts<-asv_feat.counts%>%
+  mutate(total_count=sum(asv_feat.counts$count))
+
+## we are only going to use genus level for further analysis. 
+
+#count missing values
+asv_total.counts%>%
+  summarise(count=sum(is.na(genus)))
+
+print(distinct(asv_total.counts,genus))
+
+#genus col had some empty rows.Remove empty rows from genus col
+asv_total.counts<-asv_total.counts[!asv_total.counts$genus=="",]
+
+#get rel.abundance
+asv_rel.abun<-asv_total.counts%>%
+  group_by(oligos_id,genus)%>%
+  summarise(rel.abundance = sum(count/total_count))%>%
+  spread(genus,rel.abundance)%>%
+  drop_na(oligos_id)
+
+#replace NA with 0
+asv_rel.abun[is.na(asv_rel.abun)] <- 0
+```
+
+```{r meta-data}
+meta_data <- read_excel("../16S_mouse/../Submission of samples for 16S_Peled_6232022_Sample details.xlsx")
+
+colnames(meta_data)
+
+meta_data<-meta_data%>%
+  select(Condition,`Tube Barecode`,`Unique Sample ID`,`Day of Stool Collection`,`Sample Collection Date`)%>%
+  rename(oligos_id = `Tube Barecode`)
+```
+
+```{r metadata rel.abundance}
+meta_relab <- left_join(meta_data,asv_rel.abun,by='oligos_id')
+
+glimpse(meta_relab)
+
+# get top 20 genera
+rel_abun_top<-asv_rel.abun[asv_rel.abun$oligos_id %in% meta_relab$oligos_id,]
+col_choice = names(sort(colMeans(rel_abun_top[,-1]), decreasing = T) [1:20])
+print(col_choice)
+
+top20_gen<-rel_abun_top %>%
+  select(col_choice,oligos_id)%>%
+  gather(genus, rel_abundance, Lactobacillus:Microbacterium)
+
+test.plot<-meta_relab%>%
+  ggplot(aes(x=oligos_id,y=rel.abundance,fill=genus))+
+  geom_bar(stat = "identity",position = "fill")+
+  scale_y_continuous(expand=c(0,0))+
+  facet_wrap(~ Condition)+
+  labs(x='Samples',y='Relative Abundance')+
+  theme(axis.text.x = element_text(angle=90, hjust=1),
+        legend.text = element_text(face = "italic"))
+test.plot
+
+```
+
+
