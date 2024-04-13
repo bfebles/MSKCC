@@ -1,0 +1,10 @@
+sample_dir: "/data/peledj/Binita/Colibactin_pipeline/samples"
+shortbred_identify_path: "/home/feblesb/APPS/shortbred-0.9.4/shortbred_identify.py"
+shortbred_quantify_path: "/home/feblesb/APPS/shortbred-0.9.4/shortbred_quantify.py"
+target_fa_path: "/data/peledj/Binita/Colibactin_pipeline/colibactin_genes.fasta"
+uniref_path: "/data/peledj/Binita/dbs/uniref90/uniref90.fasta"
+usearch_path: "/home/feblesb/APPS/usearch"
+blastp: "/home/feblesb/miniconda3/envs/shortbred/bin/"
+makeblastdb: "/home/feblesb/miniconda3/envs/shortbred/bin/"
+
+
