@@ -1,0 +1,5 @@
+This pipeline takes human decontaminated reads in merged R1 and R2 metagenomic samples. 
+It creates short markers that uniquely represent each colibactin(bacterial toxin) gene family.
+It maps the decontaminated metagenomic samples to the colibactin markers. This mapping process identifies which colibactin genes are present in the sample.
+It produces output files that include information about the identified colibactin genes, their abundance, and other related data in each sample.
+It uses bash script to modify the output files for downstream analysis.
