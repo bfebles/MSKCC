@@ -1,0 +1,72 @@
+---
+title: "cytolysin"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+library(vegan)
+library(vdbR)
+library(tableone)
+
+```
+
+```{r shortbred results}
+
+#load cytolysin table from shortbred output
+cytolysin<-read.csv('cyl_shortbred.tsv', check.names = FALSE, stringsAsFactors = TRUE, header = FALSE, sep = '\t')
+
+#add headers to each cols
+colnames(cytolysin)<-c("fid","Cyl_Family","Cyl_Count","Cyl_Hits","Cyl_TotalMarkerLength")
+
+#remove .tsv from sample col
+cytolysin$fid<-gsub('.tsv','',cytolysin$fid)
+
+n_distinct(cytolysin$fid)
+
+#separate Cytolysin Family column into two different columns
+cytolysin<-separate(cytolysin,col=Cyl_Family,into=c('Uniref_Family', 'Cyl_Family'), sep = "\\|")
+
+```
+
+```{r}
+connect_database()
+get_table_from_database("shotgun_lookup_ad")
+
+#get sampleid from shotgun table
+cyl.samples <- shotgun_lookup_ad %>%
+  distinct(sampleid, .keep_all = TRUE) %>%
+  inner_join(cytolysin, by = 'fid') %>%
+  filter(!is.na(sampleid)) %>%
+  select(sampleid, Cyl_Family, Cyl_Count)
+
+
+n_distinct(cyl.samples$sampleid)
+n_distinct(shotgun_lookup_ad$sampleid)
+
+#cyl.samples%>%group_by(sampleid)%>%filter(n() > 1)
+
+write.csv(cyl.samples,'tblShortbredSamples.csv')
+
+```
+
+```{r}
+#make table to detect presence and absence of genes by counting total sum of cytolysin count in each sample
+cyl.sum.count<-cyl.samples%>%
+  group_by(sampleid)%>%
+  summarise(n = mean(Cyl_Count))%>%
+  mutate(Cyl_PA = ifelse(n>0,'present','absent'))%>%
+  ungroup()
+
+summary(cyl.sum.count$n)
+
+write.csv(cyl.sum.count,'tblShortbredPresentSamples.csv',row.names = FALSE)
+
+```
+
+

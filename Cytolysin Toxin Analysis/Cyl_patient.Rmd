@@ -1,0 +1,134 @@
+---
+title: "Cytolysin_patient"
+output: html_document
+date: "2023-10-09"
+---
+
+```{r library}
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+library(ggpubr)
+library(vdbR)
+library(janitor)
+library(readxl)
+library(gridExtra)
+```
+
+```{r}
+connect_database()
+get_table_from_database("patient_allo_ks_20221104")
+get_table_from_database("samples_castori_ag")
+cyl.data<-read.csv('tblShortbredPresentSamples.csv')
+cyl.full.data<-read.csv('tblShortbredSamples.csv')
+n_distinct(cyl.full.data$sampleid)
+
+patient_allo_ks_20221104<-patient_allo_ks_20221104%>%
+  arrange(hct)%>% 
+  filter(!duplicated(mrn)) 
+
+
+pt.table<-samples_castori_ag%>%
+  filter(sampleid %in% cyl.data$sampleid)%>%
+  filter(sampletype %in% c("Stool","stool"))%>%
+  left_join(cyl.data,by='sampleid',multiple = "all")%>%
+  select(sampleid,mrn,datecollection,n,Cyl_PA)%>%
+  filter(mrn %in% patient_allo_ks_20221104$mrn)%>%
+  left_join(patient_allo_ks_20221104,by="mrn", multiple="all")%>%
+  mutate(hct=as.Date(hct))%>%
+  mutate(day_rel_to_HCT = as.numeric(datecollection - hct))%>%
+  select(sampleid,mrn,datecollection,n,Cyl_PA,hct,day_rel_to_HCT,disease,vital_status,d100_a_gvhd,d100_a_gvhd)%>%
+  mutate(Transplant_timepoint=case_when(
+    day_rel_to_HCT <= 0 ~ 'Pre-HCT',
+    day_rel_to_HCT %in% 1:14 ~ 'HCT',
+    day_rel_to_HCT >14 ~ 'Post-HCT'
+  ))
+str(pt.table)
+
+n_distinct(pt.table$mrn) #609
+n_distinct(pt.table$sampleid) #1809
+table(pt.table$Cyl_PA)
+
+write.csv(pt.table, 'pt_cyl_data.csv',row.names = FALSE)
+
+```
+
+```{r sample distribution}
+pt.table%>%
+  filter(day_rel_to_HCT %in% -20:100)%>%
+  ggplot(aes(day_rel_to_HCT))+
+  geom_histogram(aes(fill = Cyl_PA),binwidth = 5)+
+  scale_fill_brewer(palette = 'Dark2')+
+  scale_y_sqrt()+
+  labs(x = 'Day_rel_to_HCT', y = 'Number of Samples', fill = 'Cytolysin')+
+  theme_classic()+
+  scale_y_continuous(expand = c(0,0))+
+  theme(axis.title = element_text(size =12,face = 'bold'),
+        axis.text = element_text(size=10),
+        legend.title = element_text(size = 12, face = 'bold'))
+ggsave('cylsamples_HCT.pdf')
+```
+
+```{r cytolysin distribution}
+pt.table%>%
+  filter(day_rel_to_HCT %in% -30:100, Cyl_PA=="present")%>%
+  ggplot(aes(day_rel_to_HCT,n))+
+  geom_point(size = 2.5, alpha = 0.6, color = 'darkgreen')+
+    geom_smooth(method = "lm", color = "darkred", size = 2)+stat_cor()+
+  scale_y_log10()+
+  labs(x = 'Day_rel_to_HCT', y = 'Cytolysin RPKM (log10)')+
+  theme_classic()+
+  theme(axis.title = element_text(size =12,face = 'bold'),
+        axis.text = element_text(size=10))
+ 
+#no outliers as the cyl rpkm from shortbred is already normalized
+
+ggsave('cyl_HCT.png')
+
+
+```
+
+```{r cytolysin patient samples}
+
+clinical.taxa<-pt.table%>%
+  #select(-c(Cyl_PA)) %>%
+  left_join(dominant_g_df,by='sampleid')%>%
+  mutate(g.Abundance = as.numeric(g.Abundance))
+  #filter(g.Abundance > 0.05)
+  #rename(genus='Genus')
+str(clinical.taxa)
+
+#load asv color blast table
+connect_database()
+get_table_from_database('asv_annotation_blast_color_ag')
+asv_color_genus<-asv_annotation_blast_color_ag%>% 
+  select(genus,color,color_base,color_label_group)%>%
+  distinct()
+
+#join table to get distinct colors
+
+clinical.taxa.cyl<-left_join(clinical.taxa,asv_color_genus,by='genus')
+
+my_colors<-asv_color_genus$color
+names(my_colors)<-asv_color_genus$color_label_group
+
+clinical.taxa.cyl%>%
+ mutate(Cyl_PA = recode(Cyl_PA,"absent"="Cytolysin Negative","present" = "Cytolysin Postive"))%>%
+  filter(day_rel_to_HCT %in% -20:100)%>%
+  ggplot(aes(factor(Transplant_timepoint, levels = c("Pre-HCT", "HCT", "Post-HCT")), g.Abundance, color = color_label_group)) +
+  #ggplot(aes(day_rel_to_HCT, count_relative, color = color_label_group)) +
+  geom_bar(aes(fill = color_label_group),stat = 'identity', position = 'fill')+
+  facet_grid(~factor(Cyl_PA), space = 'free',scales = 'free')+
+  theme(strip.text = element_text(size = 12, face = "bold"),
+        strip.background = element_rect(fill = "darkgrey"))+
+  scale_fill_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  scale_color_manual(values = my_colors, breaks = names(my_colors), guide_legend(title=''))+
+  scale_y_continuous(expand = c(0,0))+
+  scale_x_discrete(expand = c(0,0))+
+  theme(legend.position = 'right',
+        axis.text = element_text(size = 10, face = 'bold'),
+        axis.title.y = element_text(size = 10, face = 'bold'))+
+  labs(x = '', y = 'Relative Abundance')
+
+
+```

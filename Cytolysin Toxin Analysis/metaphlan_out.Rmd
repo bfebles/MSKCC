@@ -1,0 +1,80 @@
+---
+title: "shotgun_relab_table"
+output: html_document
+date: "2023-06-18"
+---
+
+```{r}
+library(tidyverse)
+library(stringr)
+library(ggplot2)
+library(ggthemes)
+library(ggpubr)
+library(vegan)
+library(vdbR)
+library(tableone)
+
+```
+
+```{r}
+#load merged relative abundance table from metaphlan output.Each row is a taxonomic classification, each column is a sample.
+relab<-read.csv("metaphlan_merge/merged_abundance_table.txt", sep = '\t', check.names = FALSE)
+
+#remove following "_metaphlan3_profile" after fid
+colnames(relab) <- gsub("_metaphlan3_profile", "", colnames(relab))
+tail(colnames(relab))
+
+#create a long table so that we can join table with shotgun_lookup_ad by fid and retrieve sampleid
+df.relab<-relab%>%
+  filter(grepl("k__Bacteria",clade_name))%>%
+  filter(grepl("s__",clade_name))%>%
+  select(-clade_taxid)%>%
+  pivot_longer(cols = -c(clade_name),
+                names_to = 'fid',
+                values_to = 'Rel.Abundance')
+str(df.relab)
+n_distinct(df.relab$fid)
+```
+
+```{r}
+connect_database()
+get_table_from_database("shotgun_lookup_ad")
+
+
+df.relab2<-shotgun_lookup_ad %>%
+  distinct(sampleid, .keep_all = TRUE) %>%
+  inner_join(df.relab, by = 'fid')%>%
+  select()
+
+n_distinct(df.relab2$fid)
+n_distinct(df.relab2$sampleid)
+
+#check if there is any NA value in df
+sum(any(is.na(df.relab2)))
+
+df.relab3 <- na.omit(df.relab2)
+n_distinct(df.relab3$fid)
+n_distinct(df.relab3$sampleid)
+
+#df.relab2%>%group_by(sampleid)%>%filter(n() > 1)
+
+## Pivot the data frame wider with sampleid
+
+relab2<-df.relab3%>%
+  select(clade_name,sampleid,Rel.Abundance)%>%
+  pivot_wider(id_cols = clade_name,names_from = sampleid,values_from = Rel.Abundance,values_fn = sum)
+
+colnames(relab2)
+str(relab2)
+
+
+# Split 'clade_name' column into multiple columns
+relab_split <- relab2 %>%
+  separate(clade_name, into = c("Kingdom", "Phylum", "Class", "Order","Family","Genus","Species"), sep = "\\|")
+str(relab_split)
+colnames(relab_split)
+
+
+write.csv(relab_split,'tblShotgunRelAbundances.csv',row.names = FALSE,quote = FALSE)
+
+```

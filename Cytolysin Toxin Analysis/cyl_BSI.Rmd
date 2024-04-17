@@ -1,0 +1,143 @@
+---
+title: "cyl_BSI"
+output: html_document
+date: "2023-10-10"
+---
+
+```{r}
+library(vdbR)
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(janitor)
+library(stringr)
+library(patchwork)
+library(gridExtra)
+```
+
+```{r}
+#load BSI data
+#load contaminants list
+contaminant<-read_excel('master-organism-com-commensals-lists.xlsx', sheet = 'Common Commensals (CC)', skip = 2)
+BSI<-read.csv('bcx_shotgun_cohort_2023-07-25.csv')
+BSI<-BSI%>%
+  select(MRN,pos,test_date,result,n.organisms)%>%
+  mutate(result=ifelse(result == tolower(result), result, tolower(result)))%>%
+  mutate(test_date=as.Date(test_date))%>%
+  rename(mrn = 'MRN')
+
+BSI.annotated<-read.csv('BSI_result_annotated.csv')
+
+#merge BSI data with annotated data
+
+BSI.new<-left_join(BSI,BSI.annotated,by='result')%>%
+  select(-result,-n.organisms)%>%
+  rename(infectious_agent="annotated_result")%>%
+  mutate(infectious_agent=ifelse(infectious_agent == "Staphyloccus aureus", "Staphylococcus aureus", infectious_agent))
+
+# separate result column into multiple rows based on '|' delimeter
+
+BSI.new.sep <- BSI.new %>%
+  separate_rows(infectious_agent, sep = "\\s*\\|\\s*")%>%
+  mutate(common_contaminant = ifelse(infectious_agent %in% contaminant$`SNOMED Preferred Term`, "Yes", "No"),
+         common_contaminant = ifelse(grepl("coagulase ",tolower(infectious_agent)), "Yes", common_contaminant),
+         common_contaminant = ifelse(grepl("Bacillus",infectious_agent), "Yes", common_contaminant),
+         common_contaminant = ifelse(grepl("Corynebacterium",infectious_agent), "Yes", common_contaminant),
+         common_contaminant = ifelse(grepl("Micrococcus",infectious_agent), "Yes", common_contaminant))
+str(BSI.new.sep)
+
+#If the infectious agent is a "common_contaminant", then only count it if the BCX is positive 2 or more times within a 24 hour period.
+
+
+BSI.rule<-BSI.new.sep %>%
+  arrange(mrn, test_date) %>%
+  group_by(mrn, infectious_agent) %>%
+  mutate(time_diff = c(0, diff(test_date)))%>%
+  filter(
+    infectious_agent!='coagulase negative staphylococcus' &
+    common_contaminant=='Yes' &
+    pos == "TRUE" &
+    time_diff <= 1) %>%
+  group_by(mrn, infectious_agent) %>%
+  filter(n() >= 2 & time_diff>=1) 
+
+
+#keep only unique result for each patient and include patients that were in BSI rule
+
+BSI.new.tab<-BSI.new.sep%>%
+  group_by(mrn)%>%
+  filter(common_contaminant == "No" & infectious_agent!="culture negative")%>%
+  distinct(infectious_agent, .keep_all = T)%>%
+  ungroup()%>%
+  filter(!is.na(infectious_agent))
+
+# Merge BSI.rule and BSI.new.tab on 'mrn'
+BSI.final <- BSI.rule%>%select(-time_diff)%>%rbind(BSI.new.tab)
+str(BSI.final)
+```
+
+```{r}
+cyl.pt.data<-read.csv('pt_cyl_data.csv')%>%
+  mutate(hct=as.Date(hct),
+         datecollection=as.Date(datecollection))
+str(cyl.pt.data)
+
+#join BSI data with cyl.pt data
+
+cyl.BSI<-left_join(cyl.pt.data,BSI.final,by='mrn')%>%
+  filter(!is.na(infectious_agent))
+n_distinct(cyl.BSI$mrn)
+
+gram_positive <- c("Bacillus","Clostridium","Staphylococcus","Streptococcus", "Listeria","Enterococcus","Corynebacterium",
+                   "Mycobacteroides","Propionibacterium","Lactobacillus","Bifidobacterium","Actinomyces","Streptomyces","Lactococcus",
+                   "Clostridium","Peptostreptococcus","Brevibacterium","Microbacterium","gram positive","Leifsonia","Granulicatella") 
+gram_negative <- c("Escherichia", "Pseudomonas", "Klebsiella","Salmonella","Shigella","Klebsiella","Pseudomonas","Vibrio","Helicobacter",
+                   "Campylobacter","Neisseria","Haemophilus","Yersinia","Legionella","Acinetobacter","Bordetella","Brucella","Francisella",
+                   "Burkholderia","Moraxella","Rickettsia","Chlamydia","Enterobacter","Pantoea","Proteus","Stenotrophomonas","Achromobacter",
+                   "Aeromonas","Bacteroides","Bacteroides","Capnocytophaga","Chryseobacterium","Sphingomonas","Serratia","Raoultella",
+                   "gram negative","Prevotella","Ochrobactrum","Morganella","Leptotrichia","Fusobacterium","Cronobacter","Citrobacter") 
+
+BSI_summary <- cyl.BSI %>%
+  filter(!is.na(Cyl_PA)) %>%
+  mutate(
+    infectious_agent = str_trim(infectious_agent),
+    gram_category = case_when(
+      grepl(paste(gram_positive, collapse = "|"), infectious_agent) ~ "Gram-Positive",
+      grepl(paste(gram_negative, collapse = "|"), infectious_agent) ~ "Gram-Negative",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  group_by(infectious_agent, Cyl_PA,gram_category) %>%
+  summarise(total_count = n()) %>%
+  ungroup()
+
+BSI_summary_genus<-BSI_summary%>%
+  filter(infectious_agent != 'culture negative to date', infectious_agent!='coagulase-negative staphylococcus') %>%
+  mutate(genus=word(infectious_agent,1,sep=" "))%>%
+  group_by(genus,Cyl_PA,gram_category,total_count)%>%
+  summarise(genus_count=sum(total_count))%>%
+  ungroup()
+
+
+BSI_summary_genus %>%
+  #filter(infectious_agent != 'culture negative to date', infectious_agent!='coagulase-negative staphylococcus') %>%
+  filter(gram_category!='Other', genus!='gram')%>%
+  # mutate(Clb_PA = recode(Clb_PA, "absent" = "colibactin absent", "present" = "colibactin present")) %>%
+  arrange(desc(genus_count))%>%
+  ggplot(aes(x = reorder(genus,-genus_count), y = genus_count, fill = Cyl_PA)) +
+  geom_bar(stat = 'identity', position = 'stack') +
+  scale_fill_brewer(palette = 'Dark2') +
+  coord_flip() +
+  scale_y_continuous(expand = c(0,0))+
+  facet_grid(gram_category ~ ., scales = 'free_y') +
+  theme_classic()+
+  theme(strip.text = element_text(size = 12,face = 'bold'))+
+  theme(strip.placement = 'outside')+
+  labs(y = 'Number of samples', x = 'Infectious Agent', fill = 'Cytolysin') +
+  theme(axis.title = element_text(face = 'bold',size = 10),
+        axis.text = element_text(size = 10))
+
+ggsave('Cyl_BSI.png', width = 30)
+
+```
+  

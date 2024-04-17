@@ -1,0 +1,1154 @@
+---
+title: "Cytolysin_taxonomy"
+output: html_document
+date: "2023-07-26"
+---
+
+```{r}
+# devtools::install_git("https://github.mskcc.org/vdblabinternal/vdbr.git")
+library(vdbR)
+library(tidyverse)
+library(ggplot2)
+library(RColorBrewer)
+library(vegan)
+library(Rtsne)
+library(ggpubr)
+library(Maaslin2)
+library(stringr)
+```
+
+```{r clean-up}
+relab_g<-read.csv('tblShotgunRelAbundances.csv',check.names = FALSE, colClasses = 'character')
+str(relab_g)
+colnames(relab_g)
+sum(is.na(relab_g))
+
+############################## use if necessary#########################
+#some columns had leading '0' removed. add zeros to those columns
+# Columns to which we want to add leading zeros
+columns_with_zeros <- c("99", "95","94","92","91","90","89","88","84","82","77","76","42")
+
+# Add leading zeros to the specified column names using str_c
+new_colnames <- str_c("0", columns_with_zeros)
+
+# Rename the columns in the DataFrame
+names(cyl.abundance)[names(cyl.abundance) %in% columns_with_zeros] <- new_colnames
+#######################################################################
+
+relab_genus<-relab_g%>%
+  select(-c(Kingdom,Phylum,Class,Order,Family))%>%
+  pivot_longer(cols=-c(Genus,Species),names_to = 'sampleid',values_to = 'Rel.abundance')%>%
+  filter(Rel.abundance > 0)
+
+n_distinct(relab_genus$sampleid)
+
+#remove 'g__' and 's__' from df SampleID column
+relab_genus$Genus<-gsub('g__','',relab_genus$Genus)
+relab_genus$Species<-gsub('s__','',relab_genus$Species)
+n_distinct(relab_genus$sampleid)
+str(relab_genus)
+
+relab_genus$Rel.abundance<-as.numeric(relab_genus$Rel.abundance)
+```
+
+```{r maaslin-genus level}
+
+#load cyl abundance table
+
+cyl<-read.csv('tblShortbredSamples.csv')
+cyl.abundance<-read.csv('tblShortbredPresentSamples.csv')
+str(cyl.abundance)
+
+#######################. Use if necessary
+#some rows had leading '0' removed. add zeros to those rows
+rows_to_update <- which(nchar(cyl.abundance$sampleid) < 3)
+cyl.abundance$sampleid[rows_to_update]<-str_pad(cyl.abundance$sampleid,3,pad = "0")
+
+########################
+
+taxa.cyl<-full_join(cyl.abundance,relab_genus,by='sampleid')%>%
+  rename(Cyl_abundance = "n")%>%
+  filter(!is.na(Genus))
+n_distinct(taxa.cyl$sampleid)
+
+sum(is.na(taxa.cyl))
+
+#there are duplicate combinations of rel.abundance due to diff species in the genus columns to pivot the data from long to wide format.
+#Aggregate the values before pivoting
+genus_summarized<-taxa.cyl%>%
+  select(-c(Species))%>%
+  group_by(sampleid,Cyl_PA,Cyl_abundance,Genus)%>%
+  summarize(count_relative = sum(Rel.abundance))%>%
+  mutate(count_relative = count_relative/100)%>%
+  ungroup()
+
+cyl.genus_composition<-genus_summarized%>%
+  pivot_wider(names_from = Genus,values_from = count_relative)
+
+#convert NA to 0
+
+cyl.genus_composition[is.na(cyl.genus_composition)]<-0
+
+#prepare data for maaslin
+
+Features<-genus_summarized%>%
+  pivot_wider(names_from = Genus,values_from = count_relative)%>%
+  select(-c(Cyl_PA,Cyl_abundance))%>%
+  column_to_rownames(var = "sampleid")
+Features[is.na(Features)]<-0
+
+
+#metadata for present samples
+Metadata<-cyl.genus_composition%>%
+  select(sampleid,Cyl_PA,Cyl_abundance)%>%
+  filter(Cyl_PA == 'present')%>%
+  mutate(Cyl_PA = as.factor(Cyl_PA))%>%
+  column_to_rownames(var = "sampleid")
+
+#metadata for present/absent samples
+Metadata.2<-cyl.genus_composition%>%
+  select(sampleid,Cyl_PA,Cyl_abundance)%>%
+  mutate(Cyl_PA = as.factor(Cyl_PA))%>%
+  column_to_rownames(var = "sampleid")
+
+
+Metadata.2$Cyl_abundance<-Metadata.2$Cyl_abundance + 0.0001
+
+#run maaslin for cytolysin present/absent samples
+
+maaslin_result <-Maaslin2(
+  input_data = Features,
+  input_metadata = Metadata.2,
+  output = "maaslin_out",
+  fixed_effects = c("Cyl_abundance"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+#run maaslin for cytolysin present samples
+
+maaslin_result2 <-Maaslin2(
+  input_data = Features,
+  input_metadata = Metadata,
+  output = "maaslin_out_present",
+  fixed_effects = c("Cyl_abundance"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+# Samples with cytolysin positivity have higher mean abundance of Enterococcus than cytolysin negative samples
+#model<-readRDS('maaslin_out/fits/fitted.rds')
+
+alpha_levels <- c(".0001 or less", ".001", ".01", ".05", ".05 or above")
+alpha_breaks <- rev(c(.15, .5, .62, .7, .85))
+
+maaslin_out2<-maaslin_result2$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+#plot
+
+
+p<-maaslin_out2%>%
+  filter(qval <.05)%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size = 4) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 8,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=4)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=4))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p
+
+ggsave('cyl_presence_maaslin_genus.pdf', width = 12, height = 15)
+
+
+
+#based on presence or absence
+
+maaslin_cyl_category<-maaslin_result$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+
+
+
+p.2<-maaslin_cyl_category%>%
+  filter(qval <.05)%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size = 4) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 10,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=6)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=6))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p.2
+
+ggsave('cyl_pre_abs_genus.pdf',width = 12, height = 15)
+
+```
+
+```{r maaslin-species level}
+
+#prepare data for maaslin
+
+sp.features<-taxa.cyl%>%
+   select(-c(Genus,Cyl_PA,Cyl_abundance))%>%
+  pivot_wider(names_from = Species,values_from = Rel.abundance)%>%
+  column_to_rownames(var = "sampleid")
+sp.features[is.na(sp.features)]<-0
+
+
+#metadata for present samples
+sp.Metadata<-taxa.cyl%>%
+  select(sampleid,Cyl_PA,Cyl_abundance)%>%
+  filter(Cyl_PA == 'present')%>%
+  mutate(Cyl_PA = as.factor(Cyl_PA))%>%
+  distinct(sampleid,.keep_all = TRUE)%>%
+  column_to_rownames(var = "sampleid")
+
+
+#metadata for present/absent samples
+sp.Metadata.2<-taxa.cyl%>%
+  select(sampleid,Cyl_PA,Cyl_abundance)%>%
+  mutate(Cyl_PA = as.factor(Cyl_PA))%>%
+  distinct(sampleid,.keep_all = TRUE)%>%
+  column_to_rownames(var = "sampleid")
+
+
+sp.Metadata.2$Cyl_abundance<-sp.Metadata.2$Cyl_abundance + 0.0001
+
+#run maaslin for cyl present
+
+maaslin_result_sp <-Maaslin2(
+  input_data = sp.features,
+  input_metadata = sp.Metadata,
+  output = "maaslin_Out_sp",
+  fixed_effects = c("Cyl_abundance"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+#run masslin for cyl present/absent
+maaslin_result_sp.2 <-Maaslin2(
+  input_data = sp.features,
+  input_metadata = sp.Metadata.2,
+  output = "maaslin_sp_pre_abs",
+  fixed_effects = c("Cyl_abundance"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+alpha_levels <- c(".0001 or less", ".001", ".01", ".05", ".05 or above")
+alpha_breaks <- rev(c(.15, .5, .62, .7, .85))
+
+maaslin_sp<-maaslin_result_sp$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+#plot
+
+p.sp<-maaslin_sp%>%
+  filter(qval <.05)%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size=3) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 8,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=4)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=4))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p.sp
+
+
+## for cyl present/absent species
+
+maaslin_sp.2<-maaslin_result_sp.2$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+#plot
+
+p.sp.2<-maaslin_sp.2%>%
+  filter(qval < .05)%>%
+  #filter(grepl("Enterococcus",feature))%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size=3) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 10,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=6)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=6))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p.sp.2
+
+ggsave('cyl_presence_absence_species.pdf', width = 12, height = 20)
+
+p.sp.ent<-maaslin_sp.2%>%
+  #filter(qval < .05)%>%
+  filter(grepl("Enterococcus",feature))%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size=4) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 10,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=6)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=6))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p.sp.ent
+ggsave('ent.sp.pdf', width = 15)
+```
+
+```{r maaslin enterococcus}
+#check relationship of enterococcus with other features
+#first filter feature table into two parts. One without enterococcus and one with enterococcus. The one with enterococcus can be used as metadata?
+
+Enterococcus<-genus_summarized%>%
+  filter(Genus == "Enterococcus", count_relative > 0.2)%>%
+  select(sampleid,Genus,count_relative)%>%
+  column_to_rownames("sampleid")
+
+Features_no_enterococcus<-genus_summarized%>%
+  filter(!Genus=="Enterococcus") %>% 
+  pivot_wider(names_from = Genus,values_from = count_relative)%>%
+  select(-c(Cyl_PA,Cyl_abundance))%>%
+  column_to_rownames(var = "sampleid")
+
+Features_no_enterococcus[is.na(Features_no_enterococcus)]<-0
+
+#run maaslin
+
+maaslin_enterococcus <-Maaslin2(
+  input_data = Features_no_enterococcus,
+  input_metadata = Enterococcus,
+  output = "maaslin_Enterococcus",
+  fixed_effects = c("count_relative"),
+  min_prevalence = 0.1,
+  min_abundance = 0.0001,
+  normalization = "TSS",
+  #transform = "LOG",
+  analysis_method = "LM",
+  max_significance = 0.25,
+  correction = "BH",
+  standardize = TRUE,
+  plot_heatmap = TRUE,
+  plot_scatter = TRUE,
+  save_models = TRUE
+  )
+
+alpha_levels <- c(".0001 or less", ".001", ".01", ".05", ".05 or above")
+alpha_breaks <- rev(c(.15, .5, .62, .7, .85))
+
+maaslin_entero<-maaslin_enterococcus$results%>%
+  mutate(P_value = as.factor(case_when(
+        qval <.0001 ~ alpha_levels[1],
+        qval <.001 ~ alpha_levels[2],
+        qval <.01 ~ alpha_levels[3],
+        qval <.05 ~ alpha_levels[4],
+        qval >=.05 ~ alpha_levels[5])
+  ),
+  relative_change = ifelse(coef>0,"Increase","Decrease")) %>%
+  select(feature,value,P_value,coef,qval,relative_change)
+
+
+#plot
+
+p.ent<-maaslin_entero%>%
+  #filter(qval <.05)%>%
+  mutate(feature=as.factor(feature),levels=as.character(feature))%>%
+  ggplot(aes(y=coef,x=reorder(feature,coef),fill=relative_change))+
+  geom_bar(aes(alpha=P_value),stat = "identity")+
+  coord_flip()+
+  geom_text(aes(label = feature, y=0, hjust = as.numeric(coef > 0)),size=3) +
+  scale_fill_manual(values = c("red","blue"))+
+  scale_alpha_manual(values = alpha_breaks,breaks = alpha_levels)+
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y=element_blank(),
+        axis.text.x = element_text(size = 8,face = "bold"),
+        plot.background = element_rect(fill="white"),
+        panel.background = element_rect(fill="white")) + 
+  labs(x = "", y = " ", fill = "Relative Change", alpha="P-value\n(BH-corrected",title="")+
+  guides(color=guide_legend(override.aes=list(fill=NA, size=4)),
+         alpha=guide_legend(override.aes=list(fill=NA, size=4))+
+           theme(
+      legend.key=element_blank(),
+      legend.background=element_blank()))
+p.ent
+
+ggsave("enteroccus_maaslin.pdf", width = 10, height = 8)
+
+```
+```{r}
+
+genus_summarized%>%
+  filter(Genus =='Staphylococcus' | Genus =='Rothia' | Genus == 'Bacteroides' | Genus == 'Blautia')%>%
+  filter(count_relative >=0.0001) %>%
+  filter(Cyl_PA=='present')%>%
+  ggplot(aes(x=count_relative,y=Cyl_abundance))+
+    geom_point(size = 1.5, alpha = 0.4)+
+    geom_smooth(method = lm, se=FALSE,size = 2)+stat_cor(size = 2) +
+    facet_wrap(~Genus) +
+    labs(x = "Relative Abundance(log10)", y = "Cytolysin Abundance(log10)") +
+    theme_classic() +
+    scale_x_log10()+
+    scale_y_log10()+
+    theme(
+      axis.text = element_text(size = 6),
+      axis.title = element_text(size=6),
+      plot.title = element_text(size = 6))
+  
+
+ggsave('entero_as_predictor_linear.pdf')
+
+
+
+
+
+```
+
+```{r alpha diversity}
+library(vegan)
+
+#composition matrix where rows are samples and columns are taxa (genus)
+str(genus_summarized)
+
+alpha.diversity <- genus_summarized %>%
+  select(-c(Cyl_PA, Cyl_abundance)) %>%
+  filter(!is.na(Genus)) %>%
+  group_by(sampleid) %>%
+  summarise(
+    N = sum(count_relative),
+    shannon = diversity(count_relative, index = "shannon", MARGIN = 2),
+    simpson = diversity(count_relative, index = "simpson", MARGIN = 2),
+    simpson_reciprocal = diversity(count_relative, index = "invsimpson", MARGIN = 2)
+  ) %>%
+  arrange(-shannon) %>%
+  ungroup()
+
+
+
+alpha.cyl<-alpha.diversity%>%
+  select(sampleid,shannon,simpson_reciprocal)%>%
+  left_join(cyl.abundance,by='sampleid')
+
+#species level 
+
+sp.alpha.diversity<-taxa.cyl%>%
+   select(-c(Cyl_PA,Cyl_abundance,Genus))%>%
+  filter(!is.na(Species))%>%
+  group_by(sampleid)%>%
+  summarise(N=sum(Rel.abundance),
+            shannon=diversity(Rel.abundance, index = "shannon", MARGIN = 2),
+            simpson=diversity(Rel.abundance, index = "simpson", MARGIN = 2),
+            simpson_reciprocal=diversity(Rel.abundance,index="invsimpson",MARGIN = 2))%>%
+  arrange(-shannon)%>%
+  ungroup()
+
+sp.alpha.cyl<-sp.alpha.diversity%>%
+  select(sampleid,shannon,simpson_reciprocal)%>%
+  left_join(cyl.abundance,by='sampleid')
+  
+
+#plot
+
+sp.alpha.cyl%>%
+  mutate(Cyl_PA=as.factor(Cyl_PA))%>%
+  ggplot(aes(Cyl_PA,simpson_reciprocal,fill=Cyl_PA))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_point(size=0.5)+
+  scale_fill_manual(values = c("red","blue"))+
+  #geom_hline(yintercept = median(alpha.cyl$simpson_reciprocal),linetype=2)+
+  labs(x="", fill = "Cytolysin Status")+
+  theme_classic()
+
+alpha.cyl%>%
+  filter(Cyl_PA=='present')%>%
+  ggplot(aes(n,simpson_reciprocal))+
+  geom_point()+
+  geom_smooth(method = "lm",formula = y~x,se=FALSE)+
+  geom_text(
+    aes(x = max(n), y = max(simpson_reciprocal), 
+        label = paste("Spearman:", round(cor(simpson_reciprocal, n, method = "spearman"), 2),
+                      "\n", "p-value:", formatC(cor.test(simpson_reciprocal, n, method = "spearman", exact = FALSE)$p.value, format = "e", digits = 2))),
+    hjust = 1, vjust = 1, size = 4, color = "black")+
+  #stat_cor(method = "spearman")+
+  scale_x_log10()+
+  labs(x = "log10(Cytolysin Abundance)")+
+  theme(axis.title = element_text(size =12,face = "bold"),
+        axis.text = element_text(size=10))+
+  theme_classic()
+
+ggsave('alpha_diversity_cyl.pdf')
+
+```
+
+```{r enterococcus tsne}
+ent.taxa<-taxa.cyl%>%
+ # filter(grepl("Enterococcus",Species))
+  filter(Species=="Enterococcus_faecalis" | Species=="Enterococcus_faecium")
+
+ent.sp<-taxa.cyl%>%
+  #filter(grepl("Enterococcus",Species))%>%
+  filter(Species=="Enterococcus_faecalis" | Species=="Enterococcus_faecium")%>%
+  select(sampleid,Species,Rel.abundance)%>%
+  pivot_wider(names_from = Species,values_from = Rel.abundance)%>%
+  column_to_rownames("sampleid")
+
+ent.sp[is.na(ent.sp)]<-0
+
+ent.dst<-vegdist(ent.sp,method = "bray")
+tsne<-Rtsne(ent.dst,is_distance = TRUE,max_iter=5000,perplexity=30,theta=0.5)
+
+ent.tsne.df<-data.frame(tsne1=tsne$Y[,1],
+                       tsne2=tsne$Y[,2])%>%
+  bind_cols(ent.sp)%>%
+  rownames_to_column("sampleid")%>%
+  left_join(cyl.abundance,by='sampleid')
+
+ent.tsne.df_combined <- ent.tsne.df %>%
+  pivot_longer(
+    cols = c("Enterococcus_faecalis", "Enterococcus_faecium"),
+    names_to = "species",
+    values_to = "Rel.abundance"
+  )
+
+
+ent.tsne.df_combined %>%
+  filter(Rel.abundance!=0)%>%
+  ggplot(aes(x = tsne1, y = tsne2,color=species)) +
+  geom_point() +
+  theme(aspect.ratio = 1)
+
+```
+
+```{r}
+ent.tsne.df_combined %>%
+  filter(Rel.abundance!=0)%>%
+  ggplot(aes(x = tsne1, y = tsne2,color=Cyl_PA)) +
+  geom_point() +
+  theme(aspect.ratio = 1)+
+  scale_color_manual(values = c("red", "blue"))
+
+
+```
+```{r ent-cyl correlation}
+
+ent.taxa<-taxa.cyl%>%
+ # filter(grepl("Enterococcus",Species))
+  filter(Species=="Enterococcus_faecalis" | Species=="Enterococcus_faecium")%>%
+  filter(Cyl_PA == 'present')%>%
+  mutate(Rel.abundance=Rel.abundance/100)
+
+ent.taxa%>%
+  ggplot(aes(x=Rel.abundance,y=Cyl_abundance))+
+  scale_x_log10()+
+  scale_y_log10()+
+  geom_point()+
+  geom_smooth(method = lm)+stat_cor()+
+  facet_wrap(~Species)
+
+```
+
+
+```{r dominant taxa}
+
+#dominant genus
+
+taxa.comp<-genus_summarized%>%
+  filter(!is.na(Genus))%>%
+  select(-c(Cyl_PA,Cyl_abundance))%>%
+  pivot_wider(names_from = Genus,values_from = count_relative)
+
+taxa.comp[is.na(taxa.comp)]<-0
+
+# Find the most dominant taxa per sample
+taxa_comp_dom<-taxa.comp[,-1]
+
+dominant_taxa_g <- apply(taxa_comp_dom, 1, function(row) {
+  max_taxon <- names(row)[which.max(row)]
+  abundance <- max(row)
+  c(genus = max_taxon, g.Abundance = abundance)
+})
+
+# Combine the results into a dataframe
+dominant_g_df <- as.data.frame(t(dominant_taxa_g))
+dominant_g_df$sampleid <- taxa.comp$sampleid
+
+dom.g.cyl<-left_join(dominant_g_df,cyl.abundance,by='sampleid')
+
+
+
+###dominant species
+
+dom.sp<-taxa.cyl%>%
+  filter(!is.na(Species))%>%
+  select(-c(Cyl_PA,Cyl_abundance,Genus))%>%
+  pivot_wider(names_from = Species,values_from = Rel.abundance)
+
+dom.sp[is.na(dom.sp)]<-0
+
+# Find the most dominant species per sample
+sp_comp_dom<-dom.sp[,-1]
+
+# Find the most dominant species per sample
+dominant_sp <- apply(sp_comp_dom, 1, function(row) {
+  max_taxon <- names(row)[which.max(row)]
+  abundance <- max(row)
+  c(species = max_taxon, sp.Abundance = abundance)
+})
+
+# Combine the results into a dataframe
+dominant_sp_df <- as.data.frame(t(dominant_sp))
+dominant_sp_df$sampleid <- dom.sp$sampleid
+
+str(dominant_sp_df)
+
+```
+
+```{r sp.tsne}
+sp.relab.mat<-dom.sp%>%
+  column_to_rownames("sampleid")%>%
+  as.matrix
+
+sp.distance.matrix<-vegdist(sp.relab.mat,method="bray")
+
+#tsne
+
+sp.tsne<-Rtsne(sp.distance.matrix,max_iter=10000,perplexity=50,theta=0.5)
+sp.tsne.df<-data.frame(tsne1=sp.tsne$Y[,1],
+                       tsne2=sp.tsne$Y[,2])
+
+#add taxonomy and cyl data
+sp.tsne.combined<-cbind(sp.tsne.df,dominant_sp_df)%>%
+  left_join(cyl.abundance,by='sampleid')
+
+sp.tsne.combined$sp.Abundance<-as.numeric(sp.tsne.combined$sp.Abundance)
+
+sum(is.na(sp.tsne.combined))
+
+sp.tsne.combined%>%
+  filter(species == "Enterococcus_faecalis" | species == "Enterococcus_faecium") %>%
+  filter(Cyl_PA=='present')%>%
+  count(species)
+  
+
+sp.tsne.combined %>%
+  mutate(sp.Abundance = sp.Abundance / 100) %>%
+  filter(species == "Enterococcus_faecalis" | species == "Enterococcus_faecium") %>%
+  filter(Cyl_PA == 'present') %>%
+  ggplot(aes(y = n, x = sp.Abundance)) +
+  geom_point(size = 2) +
+  geom_smooth(method = lm) +
+  stat_cor() +
+  facet_wrap(~species, scales = "free") +  # Adjust scales to allow different y-axis ranges
+  theme(aspect.ratio = 1) +
+  labs(x = "Relative Abundance", y = "Cytolysin Abundance") +
+  theme_classic() +
+  theme(
+    strip.text = element_text(size = 12),  
+    strip.background = element_rect(size = 2),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size=12)
+  )
+
+ggsave("dominant_ent_cyl.pdf",width = 10)
+  
+    
+```
+```{r}
+
+sp.tsne.combined%>%
+  filter(grepl("Enterococcus",species))%>%
+  ggplot(aes(x=tsne1,y=tsne2,col=species))+
+  geom_point()+
+  scale_color_brewer(palette = "Dark2")+
+  theme_classic2()+
+  theme(aspect.ratio = 1)
+  
+ggsave('entero_sp_tsne.pdf',width = 8,height=8)
+
+ent.tsne.cyl<-sp.tsne.combined%>%
+  filter(grepl("Enterococcus",species))
+
+ent.tsne.cyl_genes<-ent.tsne.cyl%>%
+  left_join(cyl,by="sampleid")
+str(ent.tsne.cyl_genes)
+
+ent.tsne.cyl%>%
+  ggplot(aes(x=tsne1,y=tsne2,color=Cyl_PA))+
+  geom_point()+
+  geom_point(data = filter(ent.tsne.cyl, Cyl_PA == "absent"), aes(color = Cyl_PA),alpha=0.001) +
+  geom_point(data = filter(ent.tsne.cyl, Cyl_PA == "present"), aes(color = Cyl_PA),alpha=1) +
+  scale_color_manual(values = c("red", "blue"))+
+  labs(color="Cytolysin",size="Cytolysin RPKM")+
+  theme_classic()+
+  theme(aspect.ratio = 1)
+
+ggsave('entero_sp_cyl_tsne_nosize.pdf')
+
+ent.tsne.cyl_genes%>%
+  ggplot(aes(x=tsne1,y=tsne2,color=Cyl_PA))+
+  geom_point(data = filter(ent.tsne.cyl_genes, Cyl_PA == "absent"), aes(color = Cyl_PA),alpha=0.001) +
+  geom_point(data = filter(ent.tsne.cyl_genes, Cyl_PA == "present"), aes(color = Cyl_PA)) +
+  geom_point()+
+  theme(aspect.ratio = 1) +
+  scale_color_manual(values = c("red", "blue"))+
+  facet_wrap(~Cyl_Family)+
+  labs(color="Cytolysin",size="Cytolysin RPKM")
+  
+  
+
+
+
+```
+
+```{r tsne}
+#convert overall genus composition to matrix
+genus.relab.mat<-taxa.comp%>%
+  column_to_rownames("sampleid")%>%
+  as.matrix()
+
+#calculate pairwise Bray-Curtis distance
+dist.matrix<-vegdist(genus.relab.mat, method = "bray")
+
+
+#tsne coordinates
+tsne<-Rtsne(dist.matrix, max_iter =10000, perplexity = 50, theta=0.5)
+tsne.df<-data.frame(tsne1 = tsne$Y[,1],
+                      tsne2 = tsne$Y[,2])
+
+
+
+#add taxonomy data to tsne.df
+taxa.tsne.combined<-cbind(tsne.df,dominant_g_df)
+
+#join with Cytolysin present/absent table
+
+cyl_samples<-read.csv('tblShortbredPresentSamples.csv', check.names = FALSE)
+
+#sample not present in relab table because rel.abundance was zero and was filtered out.
+anti_join(cyl_samples,dominant_taxa,by='sampleid')
+
+tsne_meta<-left_join(taxa.tsne.combined,cyl_samples, by = 'sampleid')
+
+```
+
+```{r}
+#get colors from postgres
+connect_database()
+get_table_from_database('asv_annotation_blast_color_ag')
+asv_color_genus<-asv_annotation_blast_color_ag%>% 
+  select(genus,color,color_base,color_label_group)%>%
+  distinct()
+
+final.dat<-left_join(tsne_meta,asv_color_genus,by='genus')
+
+color<-final.dat%>%
+  select(color_label_group,color)%>%
+  filter(!duplicated(.))
+
+color.scheme=color$color
+names(color.scheme)=color$color_label_group
+
+final.dat%>%
+  filter(!is.na(color_label_group))%>%
+  ggplot(aes(tsne1,tsne2,col=factor(color_label_group)))+
+  geom_point()+
+  scale_color_manual(name='Dominant Taxa in samples',values=color.scheme)+
+  theme_classic()+
+  coord_fixed()
+
+ggsave('tsne_taxa.pdf')
+```
+
+```{r ent-butyrate producers}
+
+butyrate.genus <- genus_summarized %>%
+  filter(Genus %in% c("Anaerofustis", "Anaerotruncus", "Blautia", "Butyrivibrio", "Coprococcus", "Faecalibacterium"))
+
+n_distinct(butyrate.genus$Genus)
+
+butyrate.genus%>%
+  filter(Cyl_PA=='present')%>%
+  ggplot(aes(x=count_relative,y=Cyl_abundance))+
+  geom_point()+
+  theme(aspect.ratio = 1)+
+  geom_smooth(method = lm)+stat_cor()+
+  facet_wrap(~Genus)+
+  scale_x_log10()+
+  scale_y_log10()+
+  labs(x = "Relative Abundance(log10)", y = "Cytolysin Abundance(log10)") +
+  theme_classic() +
+  theme(
+    strip.text = element_text(size = 12),  
+    strip.background = element_rect(size = 1),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size=12)
+  )
+  
+
+ggsave('butyrate_genus-cyl.pdf',width=12,height = 8)
+
+
+
+```
+
+```{r ent-butyrate species}
+
+butyrate.species<-taxa.cyl%>%
+  filter(Species %in% c("Clostridium_symbiosum","Eubacterium_rectale","Eubacterium_saphenum","Eubacterium_yurii",
+                        "Eubacterium_dolichum","Agathobaculum_desmolans","Alistipes_putredinis","Anaerococcus_hydrogenalis",
+                        "Anaerococcus_prevotii","Anaerococcus_vaginalis","Anaerofustis_stercorihominis","Anaerostipes_caccae",
+                        "Brachyspira_pilosicoli","Clostridioides_difficile","Clostridium_botulinum","Clostridium_butyricum",
+                        "Clostridium_sporogenes","Eubacterium_limosum","Eubacterium_ventriosum","Fusobacterium_mortiferum",
+                        "Fusobacterium_nucleatum","Fusobacterium_varium","Eubacterium_biforme","Lactobacillus_fermentum",
+                        "Megasphaera_micronuciformis","Odoribacter_splanchnicus","Peptoniphilus_duerdenii","Peptoniphilus_harei",
+                        "Peptoniphilus_lacrimalis","Porphyromonas_asaccharolytica","Porphyromonas_endodontalis","Porphyromona_gingivalis",
+                        "Propionibacterium_acidifaciens","Pseudoramibacter_alactolyticus","Roseburia_hominis","Roseburia_intestinalis",
+                        "Roseburia_inulinivorans","Shuttleworthia_satelles","Subdoligranulum_variabile","Treponema pedis"))%>%
+  mutate(Rel.abundance=Rel.abundance/100) %>%
+  na.omit()
+
+n_distinct(butyrate.species$Species)
+
+butyrate.species%>%
+  filter(Cyl_PA=='present')%>%
+  ggplot(aes(x=Rel.abundance,y=Cyl_abundance))+
+  geom_point()+
+  geom_smooth(method = lm, se=FALSE)+stat_cor()+
+  facet_wrap(~Species)+
+  labs(x = "Relative Abundance(log10)", y = "Cytolysin Abundance(log10)") +
+  theme_classic() +
+  scale_x_log10()+
+  scale_y_log10()+
+  theme(
+    strip.text = element_text(size = 10),  
+    strip.background = element_rect(size = 1),
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size=10)
+  )
+  
+
+ggsave('butyrate_species-cyl.pdf',width=12,height = 12)
+
+```
+
+```{r bacteria category}
+library(FSA)
+
+# make a list of gram-positive and gram-negative bacteria
+
+# Define lists of gram-positive and gram-negative genera
+gram_positive <- c("Bacillus","Clostridium","Staphylococcus","Streptococcus", "Listeria","Enterococcus","Corynebacterium",
+                   "Mycobacteroides","Propionibacterium","Lactobacillus","Bifidobacterium","Actinomyces","Streptomyces","Lactococcus",
+                   "Clostridium","Peptostreptococcus") 
+gram_negative <- c("Escherichia", "Pseudomonas", "Klebsiella","Salmonella","Shigella","Klebsiella","Pseudomonas","Vibrio","Helicobacter",
+                   "Campylobacter","Neisseria","Haemophilus","Yersinia","Legionella","Acinetobacter","Bordetella","Brucella","Francisella",
+                   "Burkholderia","Moraxella","Rickettsia","Chlamydia") 
+Butyrate<- c("Anaerofustis", "Anaerotruncus", "Blautia", "Butyrivibrio", "Coprococcus", "Faecalibacterium")
+Butyrate_sp<- c("Clostridium_symbiosum","Eubacterium_rectale","Eubacterium_saphenum","Eubacterium_yurii",
+                        "Eubacterium_dolichum","Agathobaculum_desmolans","Alistipes_putredinis","Anaerococcus_hydrogenalis",
+                        "Anaerococcus_prevotii","Anaerococcus_vaginalis","Anaerofustis_stercorihominis","Anaerostipes_caccae",
+                        "Brachyspira_pilosicoli","Clostridioides_difficile","Clostridium_botulinum","Clostridium_butyricum",
+                        "Clostridium_sporogenes","Eubacterium_limosum","Eubacterium_ventriosum","Fusobacterium_mortiferum",
+                        "Fusobacterium_nucleatum","Fusobacterium_varium","Eubacterium_biforme","Lactobacillus_fermentum",
+                        "Megasphaera_micronuciformis","Odoribacter_splanchnicus","Peptoniphilus_duerdenii","Peptoniphilus_harei",
+                        "Peptoniphilus_lacrimalis","Porphyromonas_asaccharolytica","Porphyromonas_endodontalis","Porphyromona_gingivalis",
+                        "Propionibacterium_acidifaciens","Pseudoramibacter_alactolyticus","Roseburia_hominis","Roseburia_intestinalis",
+                        "Roseburia_inulinivorans","Shuttleworthia_satelles","Subdoligranulum_variabile","Treponema pedis")
+
+taxa.category<-taxa.cyl%>%
+  mutate(Category = case_when(
+    Genus %in% gram_positive ~ "Gram-Positive",
+    Genus %in% gram_negative ~ "Gram-Negative",
+    Genus %in% Butyrate ~ "Butyrate-Producers",
+    Species %in% Butyrate_sp ~ "Butyrate-Producers",
+    TRUE ~ "Other"
+  ))
+
+table(taxa.category$Category)
+
+taxa.category$Cyl_abundance_plot<-taxa.category$Cyl_abundance + 0.0001
+
+taxa.category %>%
+  filter(Cyl_PA=="present")%>%
+  filter(!Category=="Other") %>%
+  ggplot(aes(x = Category, y = Cyl_abundance,fill = Category)) +
+  geom_violin(outlier.shape = NA) +
+  geom_point(alpha = 0.2) +
+  stat_compare_means(comparisons = list(c("Gram-Negative","Gram-Positive"),c("Gram-Negative","Butyrate-Producers"),c("Gram-Positive","Butyrate-Producers")),
+                     label = "p.signif",
+                     method = "wilcox.test",
+                     hide.ns = FALSE)+
+  scale_y_log10()+
+  scale_fill_brewer(palette = "Dark2")
+
+# Filter the data and remove the "Other" category
+filtered_data <- taxa.category %>%
+  filter(Cyl_PA == "present" & !Category == "Other")
+
+# Perform Kruskal-Wallis test
+kruskal_test_result <- kruskal.test(Cyl_abundance ~ Category, data = filtered_data)
+
+# Perform post hoc Dunn's test
+post_hoc <- dunnTest(filtered_data$Cyl_abundance, g = filtered_data$Category, method = "bonferroni")
+post_hoc
+
+# Create the plot
+ggplot(filtered_data, aes(x = Category, y = Cyl_abundance, fill = Category)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_point(alpha = 0.2) +
+  labs(title = paste("Kruskal-Wallis Test p-value:", format(kruskal_test_result$p.value, digits = 4))) +
+  scale_y_log10() +
+  scale_fill_brewer(palette = "Dark2")
+
+```
+
+```{r correlation}
+library(gridExtra)
+
+genus_count<-genus_summarized%>%
+  filter(Cyl_PA == 'present')%>%
+  group_by(Genus)%>%
+  summarise(n=n())
+
+# Filter the data to include only species with more than 5 data points
+subset_data_filtered <- genus_summarized %>%
+  inner_join(genus_count, by = "Genus") %>%
+  filter(n >= 5,count_relative >=0.0001) %>%
+  select(-n)  # Remove the count column
+
+# List to store plots
+plots_list <- list()
+
+# Create and store individual plots
+for (i in unique(subset_data_filtered$Genus)) {
+  subset_data <- subset_data_filtered %>%
+    filter(Genus == i)
+  
+  p <- ggplot(subset_data,aes(x=count_relative,y=Cyl_abundance))+
+    geom_point(size = 0.5)+
+    geom_smooth(method = lm, se=FALSE,size = 1)+stat_cor(size = 2)+
+    labs(title = paste(i), x = "Relative Abundance(log10)", y = "Cytolysin Abundance(log10)") +
+    theme_classic() +
+    scale_x_log10()+
+    scale_y_log10()+
+    theme(
+      axis.text = element_text(size = 6),
+      axis.title = element_text(size=6),
+      plot.title = element_text(size = 6)
+      
+  )
+   
+  
+  
+  plots_list[[as.character(i)]] <- p
+}
+
+# Arrange plots into multiple pages with 6 plots each
+num_plots_per_page <- 6
+num_pages <- ceiling(length(plots_list) / num_plots_per_page)
+
+for (page_num in seq_len(num_pages)) {
+  start_idx <- (page_num - 1) * num_plots_per_page + 1
+  end_idx <- min(start_idx + num_plots_per_page - 1, length(plots_list))
+  plots_subset <- plots_list[start_idx:end_idx]
+  
+  # Create a grid of plots for the current page
+  grid <- grid.arrange(grobs = plots_subset, ncol = 3)
+  
+
+  # print to a PDF file
+  ggsave(filename = paste0("page_", page_num, ".pdf"), grid)
+}
+
+```
+
+
+```{r heatmap}
+
+#filter cytolysin positive samples n=263
+
+library(tidyr)
+library(igraph)
+library(cooccur)
+library(visNetwork)
+library(pheatmap)
+library(gplots)
+
+cyl_genus <- genus_summarized %>%
+  filter(Cyl_PA == 'present' & count_relative > 0.005) %>%
+  select(sampleid,Cyl_abundance,Genus,count_relative)%>%
+  filter(Genus %in% gram_positive | Genus %in% gram_negative)%>%
+  mutate(Cyl_abundance = log10(Cyl_abundance + 1)) %>%
+  pivot_wider(names_from = Genus, values_from = count_relative)%>%
+  column_to_rownames("sampleid")%>%
+  as.matrix()
+
+# Replace NULL, NA, and empty string values with 0
+cyl_genus[is.null(cyl_genus) | is.na(cyl_genus) | cyl_genus == ""] <- 0
+
+
+# Find significant pairwise co-occurrences.
+co_matrix<-cor(cyl_genus,method = 'spearman')
+summary(co_matrix)
+dim(co_matrix)
+
+# Create the heatmap
+pheatmap(co_matrix, fontsize = 8, cluster_rows = FALSE,cluster_cols = FALSE,
+         border_color = "darkgrey",
+         cellwidth = 8,cellheight = 6,
+         filename = "pheatmap.pdf")
+
+```
+
+```{r}
+
+
+cyl_sp <- taxa.cyl %>%
+  filter(Cyl_PA == 'present') %>%
+  select(sampleid, Species, Cyl_abundance, Rel.abundance) %>%
+  mutate(Species = tolower(gsub("_", " ", Species))) %>%
+  filter(grepl(paste(tolower(BSI_summary$infectious_agent), collapse = "|"), Species, ignore.case = TRUE)) %>%
+  pivot_wider(names_from = Species, values_from = Rel.abundance) %>%
+  column_to_rownames("sampleid") %>%
+  as.matrix()
+
+
+# Replace NULL, NA, and empty string values with 0
+cyl_sp[is.null(cyl_sp) | is.na(cyl_sp) | cyl_sp == ""] <- 0
+
+
+# Find significant pairwise co-occurrences.
+co_matrix_sp<-cor(cyl_sp,method = 'spearman')
+summary(co_matrix_sp)
+dim(co_matrix_sp)
+
+
+# Create the heatmap
+pheatmap(co_matrix_sp, fontsize = 8, cluster_rows = FALSE,cluster_cols = FALSE,
+         border_color = "darkgrey",
+         cellwidth = 8,cellheight = 6,
+         filename = "pheatmap_sp.pdf")
+```
+
