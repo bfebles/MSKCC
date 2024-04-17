@@ -1,0 +1,247 @@
+from os.path import join
+
+#configfile: os.path.join(workflow.basedir,"config.yaml")
+
+#full path to sample fastq files
+sample_dir = "/data/peledj/shotgun_lookup/merged_files"
+
+# A Snakemake regular expression matching the forward mate FASTQ files.
+SAMPLES, = glob_wildcards(join(sample_dir,"{sample}_concat_R1_001.fastq.gz"))
+
+# Patterns for the 1st mate and the 2nd mate using the 'sample' wildcard.
+PATTERN_R1 = '{sample}_concat_R1_001.fastq.gz'
+PATTERN_R2 = '{sample}_concat_R2_001.fastq.gz'
+
+
+#metaphlan = expand("metaphlan/{sample}_metaphlan3_profile.txt", sample_dir = sample_dir, sample=sample_names)
+
+rule all:
+    input:
+        #expand("reports/{sample}_R1_fastqc.html",sample = SAMPLES),
+        expand("trimmed/{sample}_trim.R1.fastq.gz", sample = SAMPLES),
+        expand("trimmed/{sample}_trim.R2.fastq.gz", sample = SAMPLES),
+        expand("kneaddata/{sample}_knead_gzip.done", sample = SAMPLES),
+        expand("metaphlan/{sample}_metaphlan3_profile.txt", sample=SAMPLES),
+        #expand("metaphlan_merge/merged_abundance_table.txt", sample=SAMPLES),
+        expand("shortbred_files/{sample}.tsv", sample=SAMPLES)
+
+
+# Initial FastQC to see the quality 
+
+rule initial_fastqc_run:
+    input:
+        R1=join(sample_dir, PATTERN_R1),
+        R2=join(sample_dir, PATTERN_R2),
+    output:
+        rep_R1="reports/{sample}_R1_fastqc.html",
+        rep_R2="reports/{sample}_R2_fastqc.html",
+    threads:
+        4
+    conda:
+        "../envs/fastqc.yaml"
+    log:
+        e="logs/fastqc_{sample}.e",
+        o="logs/fastqc_{sample}.o",
+    resources:
+        mem_mb=4000,
+    shell: 
+        """
+        fastqc \
+            --outdir reports/ \
+            --threads {threads} \
+            --noextract {input.R1} {input.R2} \
+            > {log.o} 2> {log.e}
+        """
+
+
+# Trim adapters with BBMap
+
+rule bbmap_run:
+    input:
+        R1=join(sample_dir, PATTERN_R1),
+        R2=join(sample_dir, PATTERN_R2),
+        adapter="/data/brinkvd/resources/references/synthetic/stephenturner-adapters/93b5f91/adapters_combined_256_unique.fasta",
+    output:
+        out_R1=temp("trimmed/{sample}_trim.R1.fastq.gz"),
+        out_R2=temp("trimmed/{sample}_trim.R2.fastq.gz"),
+        rm_R1=temp("trimmed/{sample}_discard_R1.fastq.gz"),
+        rm_R2=temp("trimmed/{sample}_discard_R2.fastq.gz"),
+        stats=temp("trimmed/{sample}_trimmingAQ.txt"),
+    threads: 8
+    log:
+        "trimmed/{sample}_bbmap_log.txt",
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 28000,
+    conda:
+        "../envs/bbmap.yaml"
+    shell:
+        """
+        bbduk.sh -Xmx1g \
+            ordered \
+            in={input.R1} in2={input.R2} \
+            out={output.out_R1} out2={output.out_R2} \
+            outm={output.rm_R1} outm2={output.rm_R2} \
+            ref={input.adapter} \
+            minlen=51  qtrim=rl trimq=10 ktrim=r k=31 mink=9 hdist=1 hdist2=1 tpe tbo \
+            stats={output.stats} \
+            threads={threads} \
+            2> {log}
+
+        """
+
+
+# Remove human reads contamination using Kneaddata
+
+rule kneaddata_run:
+    input:
+        R1="trimmed/{sample}_trim.R1.fastq.gz",
+        R2="trimmed/{sample}_trim.R2.fastq.gz",
+        bowtie2_db="/data/brinkvd/resources/indexes/human/CHM13/v2.0/bowtie2"
+    output:
+        Log='kneaddata/{sample}_knead.log',
+        gzdone=touch('kneaddata/{sample}_rerun_knead.done'),
+        zip1='kneaddata/{sample}_knead_paired_1.fastq',
+        zip2='kneaddata/{sample}_knead_paired_2.fastq'
+    params:
+        out_prefix="{sample}_knead",
+        out_dir=temp("kneaddata/{sample}"),
+    threads:
+        8
+    conda:
+        "../envs/kneaddata.yaml"
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 28000,
+    shell:
+        """
+        echo START > {output.Log}
+        kneaddata \
+            -i {input.R1} -i {input.R2} \
+            -o {params.out_dir} \
+            -db {input.bowtie2_db} \
+            --output-prefix {params.out_prefix} \
+            --bypass-trim \
+            -t {threads} \
+            --log {output.Log}
+        echo END >> {output.Log}
+        mv {params.out_dir}/{wildcards.sample}_knead_paired_1.fastq kneaddata
+        mv {params.out_dir}/{wildcards.sample}_knead_paired_2.fastq kneaddata
+        rm -fr kneaddata/{wildcards.sample}
+        """
+
+# compress fastq files
+
+rule compress_fastq_pair:
+    input:
+        R1='kneaddata/{sample}_knead_paired_1.fastq',
+        R2='kneaddata/{sample}_knead_paired_2.fastq',
+        trigger='kneaddata/{sample}_rerun_knead.done'
+    output:
+        touch('kneaddata/{sample}_knead_gzip.done')
+    shell:
+        'gzip -9 {input.R1}; gzip -9 {input.R2}'
+
+# metaphlan 3
+
+# cat pair decontaminated end reads 
+
+rule cat_pair:
+    input:
+        'kneaddata/{sample}_knead_gzip.done'
+    params:
+        R1='kneaddata/{sample}_knead_paired_1.fastq.gz',
+        R2='kneaddata/{sample}_knead_paired_2.fastq.gz'
+    output:
+        joined='kneaddata/{sample}_knead_cat.fastq.gz'
+    shell:
+        'cat {params.R1} {params.R2} > {output.joined}'
+
+#rule metaphlan3 
+
+rule metaphlan3_run:
+    input:
+        fastq='kneaddata/{sample}_knead_cat.fastq.gz',
+        db="/data/peledj/dbs/metaphlan/"
+    output:
+        outfile='metaphlan/{sample}_metaphlan3_profile.txt',
+        sam='metaphlan/{sample}.sam.bz2'
+    threads:
+        8
+    conda:
+        "../envs/metaphlan.yaml"
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 100000,
+    log:
+        e="metaphlan/{sample}_metaphlan.log",
+    shell:
+        """
+        #the presence of this file causes an error from metaphlan
+        #which make rerunning irritating
+        if [ -f "{input.fastq}.bowtie2out.txt" ]
+        then
+            rm {input.fastq}.bowtie2out.txt
+        fi 
+        export METAPHLAN_BOWTIEW_DB={input.db}
+        metaphlan {input.fastq} \
+            --bowtie2db {input.db} \
+            --index mpa_v31_CHOCOPhlAn_201901 \
+            --input_type fastq \
+            -s {output.sam} \
+            --add_viruses \
+            --unknown_estimation \
+            --nproc {threads} \
+            -t rel_ab_w_read_stats \
+            -o {output.outfile} \
+            2> {log.e}
+        """
+
+# merge metaphlan output
+
+rule metaphlan_merge_table:
+    input:
+        "metaphlan/{sample}_metaphlan3_profile.txt",
+        merge_path="/data/peledj/shotgun_lookup/shotgun_pipeline/.snakemake/conda/e97e5fc1eaa0dffdc7bd223ed6c0b230_/bin/merge_metaphlan_tables.py"
+    output:
+        out1="metaphlan_merge/merged_abundance_table.txt",
+        out2="metaphlan_merge/merged_abundance_table_genus.txt",
+        out3="metaphlan_merge/merged_abundance_table_species.txt"
+    params:
+        profiles="metaphlan/*_metaphlan3_profile.txt"
+    threads:
+        2
+    conda:
+        "../envs/metaphlan.yaml"
+    resources:
+        mem_mb=4000,
+    shell:
+        """
+        python {input.merge_path} {params.profiles} > {output.out1}
+        grep -E "(g__)|(^ID)|(clade_name)|(UNKNOWN)" {output.out1} | awk 'NR == 1 || $1 ~ /g__[A-Za-z]*$/' > {output.out2}
+        grep -E "(s__)|(^ID)|(clade_name)|(UNKNOWN)" {output.out1} | grep -v "t__" | sed 's/^.*s__//g' > {output.out3}
+        """
+
+#run shortbred for cytolysin
+
+rule shortbred:
+    input:
+        reads="kneaddata/{sample}_knead_cat.fastq.gz",
+        cytolysin_markers="/data/peledj/Cytolysin/cyl_markers.faa",
+        shortbred_quantify="/home/feblesb/APPS/shortbred-0.9.4/shortbred_quantify.py",
+        usearch_path="/home/feblesb/APPS/usearch"
+    output:
+        'shortbred_files/{sample}.tsv'
+    params:
+        tmpdir='shortbred_files/tmp_{sample}'
+    conda:
+        '../envs/shortbred.yaml'
+    threads:
+        10
+    resources:
+        mem_mb=lambda wildcards, attempt: attempt * 28000,
+    shell:
+        '''
+        python {input.shortbred_quantify} --markers {input.cytolysin_markers} \
+            --wgs {input.reads} --results {output} --tmp {params.tmpdir} \
+            --usearch {input.usearch_path} --threads {threads}
+        '''
+
+

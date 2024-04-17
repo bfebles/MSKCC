@@ -1,0 +1,12 @@
+name: kneaddata
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - kneaddata=0.10.0
+  - bmtagger=3.101
+  - bowtie2=2.2.5
+  - trf=4.09.1
+  - trimmomatic=0.39
+prefix: /home/feblesb/miniconda3/envs/kneaddata
